@@ -602,7 +602,8 @@ impl GtfsMatchIndex {
                         continue;
                     };
                     let timezone = self.timezone_for_route(&trip.route_id);
-                    let Some(service_dates) = candidate_service_dates(observed_calls, timezone) else {
+                    let Some(service_dates) = candidate_service_dates(observed_calls, timezone)
+                    else {
                         continue;
                     };
 
