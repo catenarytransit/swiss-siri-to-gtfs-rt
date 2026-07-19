@@ -1,5 +1,5 @@
 use crate::enhanced_processor::process_siri;
-use crate::siri_models::SiriResponse;
+use crate::siri_models::{Siri, SiriResponse};
 use crate::state::AppState;
 use reqwest::Client;
 use std::sync::Arc;
@@ -18,22 +18,26 @@ pub async fn start_downloader(state: Arc<AppState>, url: String) {
                 Ok(response) if response.status().is_success() => {
                     match response.text().await {
                         Ok(siri_payload_text) => {
-                            let siri_payload_result: Result<SiriResponse, _> =
-                                serde_json::from_str(&siri_payload_text);
+                            // XML deserializers consume the contents of the root element.
+                            // Parse <Siri> directly, then restore the wrapper expected by
+                            // the existing processing pipeline.
+                            let siri_payload_result =
+                                quick_xml::de::from_str::<Siri>(&siri_payload_text)
+                                    .map(|siri| SiriResponse { siri });
 
                             match siri_payload_result {
                                 Ok(siri_payload) => {
-                                    println!("Successfully fetched and parsed SIRI payload.");
+                                    println!("Successfully fetched and parsed SIRI XML payload.");
                                     // Process payload into state
                                     process_siri(state.clone(), siri_payload).await;
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to parse SIRI JSON: {}", e);
+                                    eprintln!("Failed to parse SIRI XML: {}", e);
                                 }
                             }
                         }
                         Err(e) => {
-                            eprintln!("Failed to parse SIRI JSON: {}", e);
+                            eprintln!("Failed to read SIRI XML response body: {}", e);
                         }
                     }
                 }

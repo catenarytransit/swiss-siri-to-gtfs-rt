@@ -161,9 +161,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
         now.saturating_sub(assignment.last_seen_epoch) <= VEHICLE_ASSIGNMENT_RETENTION_SECONDS
     });
 
-    println!(
-        "Recovered matches: adaptive = {adaptive_matches}, cache = {cached_matches}"
-    );
+    println!("Recovered matches: adaptive = {adaptive_matches}, cache = {cached_matches}");
 
     publish_and_cache_feed(state.clone(), feed).await;
 }

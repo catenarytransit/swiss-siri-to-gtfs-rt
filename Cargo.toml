@@ -12,6 +12,7 @@ futures-util = "0.3.32"
 gtfs-realtime = "0.2.0"
 gtfs-structures = "0.48.2"
 prost = "0.14.4"
+quick-xml = { version = "0.40", features = ["serialize"] }
 reqwest = { version = "0.13.4", features = ["json", "stream"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
