@@ -58,7 +58,8 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                 }
 
                 let mut match_source = None;
-                let mut matched = adaptive_matching::match_journey(journey, gtfs, match_index, stop_alias_index);
+                let mut matched =
+                    adaptive_matching::match_journey(journey, gtfs, match_index, stop_alias_index);
                 if matched.is_some() {
                     match_source = Some("adaptive");
                 }
@@ -254,8 +255,7 @@ fn build_matched_entity(
                 .as_deref()
                 .is_some_and(is_cancelled_status)
         {
-            stop_update.schedule_relationship =
-                Some(StopTimeScheduleRelationship::Skipped as i32);
+            stop_update.schedule_relationship = Some(StopTimeScheduleRelationship::Skipped as i32);
         }
 
         if let Some(timestamp) = realtime_or_aimed_arrival(call) {
@@ -275,7 +275,7 @@ fn build_matched_entity(
             .departure_platform_name
             .as_ref()
             .or(call.arrival_platform_name.as_ref())
-                .and_then(|value| value.value.as_deref())
+            .and_then(|value| value.value.as_deref())
             .filter(|value| !value.eq_ignore_ascii_case("unknown"))
         {
             platforms.push(PlatformInfo {
@@ -336,7 +336,8 @@ fn build_extra_journey_entity(
         let Some(stop_id) = stop_ref
             .value
             .as_deref()
-            .and_then(|value| stop_alias_index.first(value)) else {
+            .and_then(|value| stop_alias_index.first(value))
+        else {
             continue;
         };
 
@@ -351,8 +352,7 @@ fn build_extra_journey_entity(
                 .as_deref()
                 .is_some_and(is_cancelled_status)
         {
-            stop_update.schedule_relationship =
-                Some(StopTimeScheduleRelationship::Skipped as i32);
+            stop_update.schedule_relationship = Some(StopTimeScheduleRelationship::Skipped as i32);
         }
         if let Some(timestamp) = realtime_or_aimed_arrival(call) {
             stop_update.arrival = Some(StopTimeEvent {
@@ -469,12 +469,18 @@ async fn publish_and_cache_feed(state: Arc<AppState>, feed_msg: FeedMessage) {
 
         let temp_path = cache_path.with_extension("pb.tmp");
         if let Err(e) = tokio::fs::write(&temp_path, buf).await {
-            eprintln!("Failed to write temporary GTFS-RT cache file {}: {e}", temp_path.display());
+            eprintln!(
+                "Failed to write temporary GTFS-RT cache file {}: {e}",
+                temp_path.display()
+            );
             return;
         }
 
         if let Err(e) = tokio::fs::rename(&temp_path, &cache_path).await {
-            eprintln!("Failed to rename temporary GTFS-RT cache to {}: {e}", cache_path.display());
+            eprintln!(
+                "Failed to rename temporary GTFS-RT cache to {}: {e}",
+                cache_path.display()
+            );
         }
     });
 }
@@ -486,9 +492,9 @@ mod tests {
     #[test]
     fn recovered_update_replaces_malformed_strict_update() {
         use crate::state::{AppState, PlatformInfo};
-        use gtfs_realtime::{FeedEntity, TripUpdate, TripDescriptor};
-        use std::sync::Arc;
         use dashmap::DashMap;
+        use gtfs_realtime::{FeedEntity, TripDescriptor, TripUpdate};
+        use std::sync::Arc;
         use tokio::sync::RwLock;
 
         let state = Arc::new(AppState {
@@ -516,10 +522,16 @@ mod tests {
         rec_trip_update.trip = rec_trip_desc;
         recovered_entity.trip_update = Some(rec_trip_update);
 
-        let recovered = vec![(recovered_entity.clone(), Some(("trip-123".to_string(), vec![PlatformInfo {
-            stop_id: "stop-1".to_string(),
-            platform_name: "platform-1".to_string(),
-        }])))];
+        let recovered = vec![(
+            recovered_entity.clone(),
+            Some((
+                "trip-123".to_string(),
+                vec![PlatformInfo {
+                    stop_id: "stop-1".to_string(),
+                    platform_name: "platform-1".to_string(),
+                }],
+            )),
+        )];
 
         let mut existing_trip_ids = feed
             .entity
@@ -579,6 +591,9 @@ mod tests {
 
         assert_eq!(feed.entity.len(), 1);
         assert_eq!(feed.entity[0].id, "entity-recovered");
-        assert_eq!(state.trip_platforms.get("trip-123").unwrap().value()[0].stop_id, "stop-1");
+        assert_eq!(
+            state.trip_platforms.get("trip-123").unwrap().value()[0].stop_id,
+            "stop-1"
+        );
     }
 }

@@ -24,40 +24,38 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-const GTFS_URL: &str = "https://eu.ftp.opendatasoft.com/stif/GTFS/IDFM-gtfs.zip";
-const SIRI_URL: &str =
-    "https://prim.iledefrance-mobilites.fr/marketplace/estimated-timetable?LineRef=ALL";
-const KEYS_FILE: &str = "keys.txt";
+const GTFS_URL: &str = "https://www.rejseplanen.info/labs/GTFS.zip";
+const SIRI_URL: &str = "https://jbb.ghsq.de/siri/danmark";
 
 #[tokio::main]
 async fn main() -> Result<()> {
     println!("Initializing Ile-de-France GTFS-RT Server...");
 
-    let key_manager = Arc::new(KeyManager::new(KEYS_FILE)?);
     let state = {
         let rt_cache_path = std::env::var("GTFS_RT_CACHE_PATH")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from("./gtfs-rt.pb"));
 
         let initial_feed = match tokio::fs::read(&rt_cache_path).await {
-            Ok(bytes) => {
-                match FeedMessage::decode(&bytes[..]) {
-                    Ok(feed) => {
-                        println!(
-                            "Recovered cached GTFS-RT feed from {}: {} entities",
-                            rt_cache_path.display(),
-                            feed.entity.len()
-                        );
-                        feed
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to decode cached GTFS-RT feed: {e}");
-                        FeedMessage::default()
-                    }
+            Ok(bytes) => match FeedMessage::decode(&bytes[..]) {
+                Ok(feed) => {
+                    println!(
+                        "Recovered cached GTFS-RT feed from {}: {} entities",
+                        rt_cache_path.display(),
+                        feed.entity.len()
+                    );
+                    feed
                 }
-            }
+                Err(e) => {
+                    eprintln!("Failed to decode cached GTFS-RT feed: {e}");
+                    FeedMessage::default()
+                }
+            },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                println!("No cached GTFS-RT feed found at {}", rt_cache_path.display());
+                println!(
+                    "No cached GTFS-RT feed found at {}",
+                    rt_cache_path.display()
+                );
                 FeedMessage::default()
             }
             Err(e) => {
@@ -73,7 +71,7 @@ async fn main() -> Result<()> {
     gtfs_manager::start_gtfs_updater(state.clone(), GTFS_URL.to_string()).await?;
 
     // Start background SIRI downloader loop
-    downloader::start_downloader(state.clone(), key_manager, SIRI_URL.to_string()).await;
+    downloader::start_downloader(state.clone(), SIRI_URL.to_string()).await;
 
     // HTTP Server Setup
     let state_filter = warp::any().map(move || state.clone());

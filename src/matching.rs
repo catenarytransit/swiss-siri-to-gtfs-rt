@@ -325,9 +325,9 @@ impl GtfsMatchIndex {
                 let parent = patterns
                     .iter()
                     .filter(|pattern| {
-                        target_destination.iter().any(|dest| {
-                            self.stops_equivalent(&pattern.destination_stop_id, dest)
-                        })
+                        target_destination
+                            .iter()
+                            .any(|dest| self.stops_equivalent(&pattern.destination_stop_id, dest))
                     })
                     .collect::<Vec<_>>();
 
@@ -421,9 +421,9 @@ impl GtfsMatchIndex {
                         .get(*trip_id)
                         .and_then(|trip| trip.stop_times.last())
                         .is_some_and(|stop_time| {
-                            target_destination.iter().any(|dest| {
-                                self.stops_equivalent(&stop_time.stop.id, dest)
-                            })
+                            target_destination
+                                .iter()
+                                .any(|dest| self.stops_equivalent(&stop_time.stop.id, dest))
                         })
                 })
                 .collect::<Vec<_>>();
@@ -467,8 +467,8 @@ impl GtfsMatchIndex {
         let timezone = self.timezone_for_route(&trip.route_id);
         let service_date = self.infer_service_date(trip, observed_calls, timezone, gtfs);
 
-        let (stop_indices, used_parent_station_match) = self
-            .first_alignment_for_trip(trip, observed_calls)?;
+        let (stop_indices, used_parent_station_match) =
+            self.first_alignment_for_trip(trip, observed_calls)?;
 
         Some(JourneyMatch {
             trip_id,
@@ -519,19 +519,20 @@ impl GtfsMatchIndex {
             None
         };
 
-        let parent_destination_patterns = if exact_destination_patterns.is_none() && !target_destination.is_empty() {
-            let parent = patterns
-                .iter()
-                .filter(|pattern| {
-                    target_destination.iter().any(|dest| {
-                        self.stops_equivalent(&pattern.destination_stop_id, dest)
+        let parent_destination_patterns =
+            if exact_destination_patterns.is_none() && !target_destination.is_empty() {
+                let parent = patterns
+                    .iter()
+                    .filter(|pattern| {
+                        target_destination
+                            .iter()
+                            .any(|dest| self.stops_equivalent(&pattern.destination_stop_id, dest))
                     })
-                })
-                .collect::<Vec<_>>();
-            (!parent.is_empty()).then_some(parent)
-        } else {
-            None
-        };
+                    .collect::<Vec<_>>();
+                (!parent.is_empty()).then_some(parent)
+            } else {
+                None
+            };
 
         let candidate_patterns = match exact_destination_patterns {
             Some(exact) => exact,
@@ -819,7 +820,6 @@ fn extract_idfm_id(value: &str) -> Option<String> {
     Some(format!("IDFM:{id}"))
 }
 
-
 fn parse_timestamp(value: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(value)
         .ok()
@@ -870,8 +870,10 @@ impl DpScore {
             (self_comp, other_comp) => {
                 let self_total = self.total_difference;
                 let other_total = other.total_difference;
-                let self_mean_less = self_total * (other_comp as i128) < other_total * (self_comp as i128);
-                let self_mean_eq = self_total * (other_comp as i128) == other_total * (self_comp as i128);
+                let self_mean_less =
+                    self_total * (other_comp as i128) < other_total * (self_comp as i128);
+                let self_mean_eq =
+                    self_total * (other_comp as i128) == other_total * (self_comp as i128);
 
                 if self_mean_less {
                     true
@@ -927,8 +929,10 @@ fn find_best_alignment(
                 let stop_time = &trip.stop_times[s - 1];
                 let gtfs_stop_id = stop_time.stop.id.as_str();
 
-                let matches = observed_call.stop_aliases.iter().any(|siri_stop_id| {
-                    match mode {
+                let matches = observed_call
+                    .stop_aliases
+                    .iter()
+                    .any(|siri_stop_id| match mode {
                         StopMatchMode::Exact => gtfs_stop_id == siri_stop_id,
                         StopMatchMode::ParentStation => {
                             canonical_stop_ids
@@ -940,8 +944,7 @@ fn find_best_alignment(
                                     .map(String::as_str)
                                     .unwrap_or(siri_stop_id)
                         }
-                    }
-                });
+                    });
 
                 if matches {
                     let mut match_comparisons = 0;
@@ -977,7 +980,8 @@ fn find_best_alignment(
                     }
 
                     let new_score = DpScore {
-                        total_difference: prev_score.total_difference + i128::from(match_total_diff),
+                        total_difference: prev_score.total_difference
+                            + i128::from(match_total_diff),
                         max_difference: prev_score.max_difference.max(match_max_diff),
                         comparisons: prev_score.comparisons + match_comparisons,
                     };
@@ -1044,8 +1048,10 @@ fn has_valid_alignment(
             let mut possible = dp[c][s - 1];
             if dp[c - 1][s - 1] {
                 let gtfs_stop_id = stop_ids[s - 1].as_str();
-                let matches = observed_call.stop_aliases.iter().any(|siri_stop_id| {
-                    match mode {
+                let matches = observed_call
+                    .stop_aliases
+                    .iter()
+                    .any(|siri_stop_id| match mode {
                         StopMatchMode::Exact => gtfs_stop_id == siri_stop_id,
                         StopMatchMode::ParentStation => {
                             canonical_stop_ids
@@ -1057,8 +1063,7 @@ fn has_valid_alignment(
                                     .map(String::as_str)
                                     .unwrap_or(siri_stop_id)
                         }
-                    }
-                });
+                    });
                 if matches {
                     possible = true;
                 }
@@ -1108,7 +1113,7 @@ fn siri_reference_suffix(value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gtfs_structures::{StopTime, Stop};
+    use gtfs_structures::{Stop, StopTime};
     use std::sync::Arc;
 
     fn make_dummy_trip<S: AsRef<str>>(stop_ids: &[S]) -> Trip {
@@ -1219,15 +1224,9 @@ mod tests {
             ("platform-c".to_string(), "platform-c".to_string()),
         ]);
 
-        assert!(
-            exact_alignments(&stop_ids, &observed_calls).is_empty()
-        );
+        assert!(exact_alignments(&stop_ids, &observed_calls).is_empty());
         assert_eq!(
-            parent_alignments(
-                &stop_ids,
-                &observed_calls,
-                &canonical,
-            ),
+            parent_alignments(&stop_ids, &observed_calls, &canonical,),
             vec![vec![0, 1]]
         );
     }
@@ -1251,10 +1250,13 @@ mod tests {
         use gtfs_structures::Stop;
         use std::collections::HashMap;
         let mut stops = HashMap::new();
-        stops.insert("IDFM:monomodalStopPlace:47874".to_string(), Arc::new(Stop {
-            id: "IDFM:monomodalStopPlace:47874".to_string(),
-            ..Default::default()
-        }));
+        stops.insert(
+            "IDFM:monomodalStopPlace:47874".to_string(),
+            Arc::new(Stop {
+                id: "IDFM:monomodalStopPlace:47874".to_string(),
+                ..Default::default()
+            }),
+        );
         let gtfs = Gtfs {
             stops,
             ..Default::default()
@@ -1266,9 +1268,11 @@ mod tests {
 
     #[test]
     fn exact_trip_without_stop_alignment_is_rejected() {
+        use crate::siri_models::{
+            EstimatedCall, EstimatedCalls, EstimatedVehicleJourney, ValueWrapper,
+        };
         use gtfs_structures::StopTime;
         use std::collections::HashMap;
-        use crate::siri_models::{EstimatedVehicleJourney, EstimatedCalls, EstimatedCall, ValueWrapper};
 
         let stop = Arc::new(Stop {
             id: "IDFM:monomodalStopPlace:12345".to_string(),
@@ -1276,28 +1280,37 @@ mod tests {
         });
 
         let mut trips = HashMap::new();
-        trips.insert("some-uuid-trip-id".to_string(), Trip {
-            id: "some-uuid-trip-id".to_string(),
-            service_id: "service-id".to_string(),
-            route_id: "IDFM:route-id".to_string(),
-            stop_times: vec![StopTime {
-                stop,
-                arrival_time: None,
-                departure_time: None,
+        trips.insert(
+            "some-uuid-trip-id".to_string(),
+            Trip {
+                id: "some-uuid-trip-id".to_string(),
+                service_id: "service-id".to_string(),
+                route_id: "IDFM:route-id".to_string(),
+                stop_times: vec![StopTime {
+                    stop,
+                    arrival_time: None,
+                    departure_time: None,
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        });
+            },
+        );
 
         let mut stops = HashMap::new();
-        stops.insert("IDFM:monomodalStopPlace:12345".to_string(), Arc::new(Stop {
-            id: "IDFM:monomodalStopPlace:12345".to_string(),
-            ..Default::default()
-        }));
-        stops.insert("IDFM:monomodalStopPlace:47874".to_string(), Arc::new(Stop {
-            id: "IDFM:monomodalStopPlace:47874".to_string(),
-            ..Default::default()
-        }));
+        stops.insert(
+            "IDFM:monomodalStopPlace:12345".to_string(),
+            Arc::new(Stop {
+                id: "IDFM:monomodalStopPlace:12345".to_string(),
+                ..Default::default()
+            }),
+        );
+        stops.insert(
+            "IDFM:monomodalStopPlace:47874".to_string(),
+            Arc::new(Stop {
+                id: "IDFM:monomodalStopPlace:47874".to_string(),
+                ..Default::default()
+            }),
+        );
 
         let gtfs = Gtfs {
             trips,

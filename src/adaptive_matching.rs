@@ -101,15 +101,12 @@ pub fn match_journey(
         return None;
     }
 
-    let operator_trajectory = journey
-        .operator_ref
-        .as_ref()
-        .is_some_and(|operator| {
-            operator
-                .value
-                .as_deref()
-                .is_some_and(is_point_observation_operator)
-        });
+    let operator_trajectory = journey.operator_ref.as_ref().is_some_and(|operator| {
+        operator
+            .value
+            .as_deref()
+            .is_some_and(is_point_observation_operator)
+    });
     let destination_aliases = journey
         .destination_ref
         .as_ref()
@@ -117,7 +114,10 @@ pub fn match_journey(
         .unwrap_or_default();
     let timezone = timezone_for_route(gtfs, &route_id);
     let service_dates = candidate_service_dates(&calls, timezone);
-    let route_type = gtfs.routes.get(&route_id).map(|route| format!("{:?}", route.route_type));
+    let route_type = gtfs
+        .routes
+        .get(&route_id)
+        .map(|route| format!("{:?}", route.route_type));
     let (early_seconds, late_seconds) = time_window(route_type.as_deref(), operator_trajectory);
 
     // Match destination in progressively weaker passes. This mirrors the Java fallback:
@@ -161,7 +161,10 @@ pub fn match_journey(
                 };
 
                 let Some(score) = score else { continue };
-                if best.as_ref().is_none_or(|current| score.is_better_than(current)) {
+                if best
+                    .as_ref()
+                    .is_none_or(|current| score.is_better_than(current))
+                {
                     best = Some(score);
                 }
             }
@@ -196,7 +199,10 @@ pub fn match_cached_assignment(
         .map_or(0, |calls| calls.estimated_call.len());
     let calls = resolve_calls(journey, aliases);
     let timezone = timezone_for_route(gtfs, &route_id);
-    let route_type = gtfs.routes.get(&route_id).map(|route| format!("{:?}", route.route_type));
+    let route_type = gtfs
+        .routes
+        .get(&route_id)
+        .map(|route| format!("{:?}", route.route_type));
     let (early, late) = time_window(route_type.as_deref(), false);
 
     let mut best: Option<AdaptiveScore> = None;
@@ -217,7 +223,9 @@ pub fn match_cached_assignment(
             continue;
         };
         if score.mean_difference <= CACHE_MAX_MEAN_DIFFERENCE_SECONDS
-            && best.as_ref().is_none_or(|current| score.is_better_than(current))
+            && best
+                .as_ref()
+                .is_none_or(|current| score.is_better_than(current))
         {
             best = Some(score);
         }
@@ -236,10 +244,7 @@ fn to_journey_match(score: AdaptiveScore) -> JourneyMatch {
     }
 }
 
-fn resolve_calls(
-    journey: &EstimatedVehicleJourney,
-    aliases: &StopAliasIndex,
-) -> Vec<ResolvedCall> {
+fn resolve_calls(journey: &EstimatedVehicleJourney, aliases: &StopAliasIndex) -> Vec<ResolvedCall> {
     journey
         .estimated_calls
         .as_ref()
@@ -307,7 +312,9 @@ fn score_unordered_calls(
             let Some(seconds) = stop_time.departure_time.or(stop_time.arrival_time) else {
                 continue;
             };
-            let Some(difference) = signed_time_difference(call.observed, service_date, seconds, timezone) else {
+            let Some(difference) =
+                signed_time_difference(call.observed, service_date, seconds, timezone)
+            else {
                 continue;
             };
             if difference < early_seconds || difference > late_seconds {
@@ -367,7 +374,9 @@ fn score_operator_trajectory(
             let Some(seconds) = stop_time.departure_time.or(stop_time.arrival_time) else {
                 continue;
             };
-            let Some(delay) = signed_time_difference(call.observed, service_date, seconds, timezone) else {
+            let Some(delay) =
+                signed_time_difference(call.observed, service_date, seconds, timezone)
+            else {
                 continue;
             };
             if delay < early_seconds || delay > late_seconds {
@@ -385,7 +394,10 @@ fn score_operator_trajectory(
     if delays.is_empty() {
         return None;
     }
-    let mut sorted = delays.iter().map(|(_, delay, _)| *delay).collect::<Vec<_>>();
+    let mut sorted = delays
+        .iter()
+        .map(|(_, delay, _)| *delay)
+        .collect::<Vec<_>>();
     sorted.sort_unstable();
     let median = sorted[sorted.len() / 2];
     let mut deviations = sorted
@@ -394,12 +406,23 @@ fn score_operator_trajectory(
         .collect::<Vec<_>>();
     deviations.sort_unstable();
     let mad = deviations[deviations.len() / 2];
-    let mad_limit = if trip.route_id.contains("Metro") { 300 } else { 480 };
+    let mad_limit = if trip.route_id.contains("Metro") {
+        300
+    } else {
+        480
+    };
     if mad > mad_limit {
         return None;
     }
-    let total = delays.iter().map(|(_, delay, _)| i128::from(delay.abs())).sum();
-    let max_difference = delays.iter().map(|(_, delay, _)| delay.abs()).max().unwrap_or(0);
+    let total = delays
+        .iter()
+        .map(|(_, delay, _)| i128::from(delay.abs()))
+        .sum();
+    let max_difference = delays
+        .iter()
+        .map(|(_, delay, _)| delay.abs())
+        .max()
+        .unwrap_or(0);
     Some(AdaptiveScore {
         trip_id: trip.id.clone(),
         service_date,
@@ -453,13 +476,19 @@ fn destination_matches(
         return true;
     }
     let stop_matches = |stop_id: &str| {
-        destination_aliases.iter().any(|alias| {
-            alias == stop_id || top_parent(alias, gtfs) == top_parent(stop_id, gtfs)
-        })
+        destination_aliases
+            .iter()
+            .any(|alias| alias == stop_id || top_parent(alias, gtfs) == top_parent(stop_id, gtfs))
     };
     match mode {
-        0 => trip.stop_times.last().is_some_and(|stop| stop_matches(&stop.stop.id)),
-        1 => trip.stop_times.iter().any(|stop| stop_matches(&stop.stop.id)),
+        0 => trip
+            .stop_times
+            .last()
+            .is_some_and(|stop| stop_matches(&stop.stop.id)),
+        1 => trip
+            .stop_times
+            .iter()
+            .any(|stop| stop_matches(&stop.stop.id)),
         _ => true,
     }
 }
@@ -485,7 +514,9 @@ fn extract_idfm_id(value: &str) -> Option<String> {
 }
 
 fn parse_timestamp(value: &str) -> Option<i64> {
-    DateTime::parse_from_rfc3339(value).ok().map(|value| value.timestamp())
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.timestamp())
 }
 
 fn timezone_for_route(gtfs: &Gtfs, route_id: &str) -> Tz {

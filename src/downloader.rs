@@ -1,20 +1,19 @@
-use crate::keys::KeyManager;
 use crate::enhanced_processor::process_siri;
+use crate::keys::KeyManager;
 use crate::siri_models::SiriResponse;
 use crate::state::AppState;
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub async fn start_downloader(state: Arc<AppState>, key_manager: Arc<KeyManager>, url: String) {
+pub async fn start_downloader(state: Arc<AppState>, url: String) {
     let client = Client::new();
 
     tokio::spawn(async move {
         loop {
-            let api_key = key_manager.get_next_key();
-            println!("Fetching SIRI feed with key {}...", &api_key[0..5]); // debug print part of key
+            println!("Fetching SIRI feed...");
 
-            let response_result = client.get(&url).header("apikey", api_key).send().await;
+            let response_result = client.get(&url).send().await;
 
             match response_result {
                 Ok(response) if response.status().is_success() => {
@@ -25,11 +24,10 @@ pub async fn start_downloader(state: Arc<AppState>, key_manager: Arc<KeyManager>
 
                             match siri_payload_result {
                                 Ok(siri_payload) => {
-
-                            println!("Successfully fetched and parsed SIRI payload.");
-                            // Process payload into state
-                            process_siri(state.clone(), siri_payload).await;
-                                },
+                                    println!("Successfully fetched and parsed SIRI payload.");
+                                    // Process payload into state
+                                    process_siri(state.clone(), siri_payload).await;
+                                }
                                 Err(e) => {
                                     eprintln!("Failed to parse SIRI JSON: {}", e);
                                 }

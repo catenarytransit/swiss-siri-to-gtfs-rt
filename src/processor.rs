@@ -412,7 +412,14 @@ mod tests {
 
         let stop_ids = calls
             .iter()
-            .map(|call| call.stop_point_ref.as_ref().unwrap().value.as_deref().unwrap())
+            .map(|call| {
+                call.stop_point_ref
+                    .as_ref()
+                    .unwrap()
+                    .value
+                    .as_deref()
+                    .unwrap()
+            })
             .collect::<Vec<_>>();
 
         assert_eq!(
@@ -431,17 +438,17 @@ mod tests {
 
     #[tokio::test]
     async fn rail_trip_updates_only_use_static_trip_stop_ids() {
-        use std::collections::HashMap;
-        use std::sync::Arc;
-        use dashmap::DashMap;
-        use gtfs_structures::{StopTime, Stop, Trip, Gtfs};
+        use crate::siri_models::{
+            EstimatedCall, EstimatedCalls, EstimatedJourneyVersionFrame,
+            EstimatedTimetableDelivery, EstimatedVehicleJourney, ServiceDelivery, Siri,
+            SiriResponse, ValueWrapper,
+        };
         use crate::state::AppState;
         use crate::state::LoadedGtfs;
-        use crate::siri_models::{
-            SiriResponse, Siri, ServiceDelivery, EstimatedTimetableDelivery,
-            EstimatedJourneyVersionFrame, EstimatedVehicleJourney, EstimatedCalls,
-            EstimatedCall, ValueWrapper,
-        };
+        use dashmap::DashMap;
+        use gtfs_structures::{Gtfs, Stop, StopTime, Trip};
+        use std::collections::HashMap;
+        use std::sync::Arc;
 
         let stop = Arc::new(Stop {
             id: "IDFM:monomodalStopPlace:12345".to_string(),
@@ -449,24 +456,30 @@ mod tests {
         });
 
         let mut trips = HashMap::new();
-        trips.insert("trip-1".to_string(), Trip {
-            id: "trip-1".to_string(),
-            service_id: "service-1".to_string(),
-            route_id: "IDFM:route-1".to_string(),
-            stop_times: vec![StopTime {
-                stop: stop.clone(),
-                arrival_time: None,
-                departure_time: None,
+        trips.insert(
+            "trip-1".to_string(),
+            Trip {
+                id: "trip-1".to_string(),
+                service_id: "service-1".to_string(),
+                route_id: "IDFM:route-1".to_string(),
+                stop_times: vec![StopTime {
+                    stop: stop.clone(),
+                    arrival_time: None,
+                    departure_time: None,
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        });
+            },
+        );
 
         let mut stops = HashMap::new();
-        stops.insert("IDFM:monomodalStopPlace:12345".to_string(), Arc::new(Stop {
-            id: "IDFM:monomodalStopPlace:12345".to_string(),
-            ..Default::default()
-        }));
+        stops.insert(
+            "IDFM:monomodalStopPlace:12345".to_string(),
+            Arc::new(Stop {
+                id: "IDFM:monomodalStopPlace:12345".to_string(),
+                ..Default::default()
+            }),
+        );
 
         let gtfs = Gtfs {
             trips,
@@ -521,7 +534,7 @@ mod tests {
                         departure_status: None,
                         arrival_platform_name: None,
                         departure_platform_name: None,
-                    }
+                    },
                 ],
             }),
         };
@@ -539,11 +552,14 @@ mod tests {
         };
 
         let feed = super::process_siri(state.clone(), siri).await;
-        
+
         assert_eq!(feed.entity.len(), 1);
         let update = feed.entity[0].trip_update.as_ref().unwrap();
         // Emits exactly one update for the mapped static stop ID 12345, skipping the unmapped one.
         assert_eq!(update.stop_time_update.len(), 1);
-        assert_eq!(update.stop_time_update[0].stop_id, Some("IDFM:monomodalStopPlace:12345".to_string()));
+        assert_eq!(
+            update.stop_time_update[0].stop_id,
+            Some("IDFM:monomodalStopPlace:12345".to_string())
+        );
     }
 }
