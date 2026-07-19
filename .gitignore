@@ -1,3 +1,5 @@
 /target
 *.zip
 *.zip.tmp
+*.patch
+*.diff
