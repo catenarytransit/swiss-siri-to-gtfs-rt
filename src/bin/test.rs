@@ -3,69 +3,65 @@ use serde_json::Value;
 use std::fs::File;
 use std::io::BufReader;
 
-fn main() {
-    println!("Loading GTFS...");
-    let gtfs = Gtfs::from_url("https://eu.ftp.opendatasoft.com/stif/GTFS/IDFM-gtfs.zip")
-        .expect("Failed to load GTFS");
-    println!("GTFS loaded. Total trips: {}", gtfs.trips.len());
+const GTFS_URL: &str = "https://www.rejseplanen.info/labs/GTFS.zip";
 
-    let mut with_short_name = 0;
-    for (_id, trip) in &gtfs.trips {
-        if trip.trip_short_name.is_some() {
-            with_short_name += 1;
-            if with_short_name <= 10 {
-                println!(
-                    "Trip ID: {}, Route: {}, Short Name: {:?}",
-                    trip.id, trip.route_id, trip.trip_short_name
-                );
-            }
-        }
-    }
-    println!("Trips with short name: {}", with_short_name);
+fn value_string(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.get("value").and_then(Value::as_str))
+}
+
+fn main() {
+    println!("Loading Danmark GTFS...");
+    let gtfs = Gtfs::from_url(GTFS_URL).expect("Failed to load GTFS");
+    println!(
+        "GTFS loaded: {} trips, {} routes, {} stops",
+        gtfs.trips.len(),
+        gtfs.routes.len(),
+        gtfs.stops.len()
+    );
 
     println!("Loading example.json...");
-    let file = File::open("example.json").unwrap();
+    let file = File::open("example.json").expect("Failed to open example.json");
     let reader = BufReader::new(file);
-    let v: Value = serde_json::from_reader(reader).unwrap();
+    let value: Value = serde_json::from_reader(reader).expect("Failed to parse example.json");
 
-    let deliveries = v["Siri"]["ServiceDelivery"]["EstimatedTimetableDelivery"]
+    let deliveries = value["Siri"]["ServiceDelivery"]["EstimatedTimetableDelivery"]
         .as_array()
-        .unwrap();
+        .expect("Missing EstimatedTimetableDelivery array");
 
-    let mut found_matches = 0;
-    let mut total_with_name = 0;
+    let mut journeys_with_line_ref = 0_usize;
+    let mut matched_journeys = 0_usize;
+    let mut candidate_routes = 0_usize;
 
-    for del in deliveries {
-        let frames = del["EstimatedJourneyVersionFrame"].as_array().unwrap();
+    for delivery in deliveries {
+        let frames = delivery["EstimatedJourneyVersionFrame"]
+            .as_array()
+            .expect("Missing EstimatedJourneyVersionFrame array");
         for frame in frames {
-            let journeys = frame["EstimatedVehicleJourney"].as_array().unwrap();
+            let journeys = frame["EstimatedVehicleJourney"]
+                .as_array()
+                .expect("Missing EstimatedVehicleJourney array");
             for journey in journeys {
-                if let Some(names) = journey["VehicleJourneyName"].as_array() {
-                    if !names.is_empty() {
-                        total_with_name += 1;
-                        let val = names[0]["value"].as_str().unwrap();
+                let Some(line_ref) = value_string(&journey["LineRef"]).map(str::trim) else {
+                    continue;
+                };
+                journeys_with_line_ref += 1;
 
-                        // Try to find a matching trip by trip_short_name
-                        let mut matched = false;
-                        for (_id, trip) in &gtfs.trips {
-                            if let Some(short_name) = &trip.trip_short_name {
-                                if short_name == val {
-                                    matched = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if matched {
-                            found_matches += 1;
-                        }
-                    }
+                let matches = gtfs
+                    .routes
+                    .values()
+                    .filter(|route| route.short_name.as_deref().map(str::trim) == Some(line_ref))
+                    .count();
+                candidate_routes += matches;
+                if matches > 0 {
+                    matched_journeys += 1;
                 }
             }
         }
     }
 
     println!(
-        "Total journeys with VehicleJourneyName: {}, Matched trips: {}",
-        total_with_name, found_matches
+        "Journeys with LineRef: {journeys_with_line_ref}, matched journeys: {matched_journeys}, candidate routes: {candidate_routes}"
     );
 }

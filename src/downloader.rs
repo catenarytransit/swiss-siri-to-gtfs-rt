@@ -1,5 +1,4 @@
 use crate::enhanced_processor::process_siri;
-use crate::keys::KeyManager;
 use crate::siri_models::SiriResponse;
 use crate::state::AppState;
 use reqwest::Client;
@@ -46,7 +45,6 @@ pub async fn start_downloader(state: Arc<AppState>, url: String) {
                 }
             }
 
-            // The user requested: "fetch this url every  100s"
             tokio::time::sleep(Duration::from_secs(100)).await;
         }
     });

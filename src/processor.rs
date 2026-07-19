@@ -51,7 +51,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) -> FeedMessa
     for delivery in siri.siri.service_delivery.estimated_timetable_delivery {
         for frame in delivery.estimated_journey_version_frame {
             for mut journey in frame.estimated_vehicle_journey {
-                // IDFM does not consistently return EstimatedCall entries in journey order.
+                // The feed may return EstimatedCall entries out of journey order.
                 // Sort them by their absolute SIRI timestamps before stop-sequence matching.
                 sort_estimated_calls_by_time(&mut journey);
                 let matched = match match_index.match_journey(&journey, gtfs) {
@@ -170,7 +170,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) -> FeedMessa
                         }
 
                         // Prefer a realtime prediction, but use the aimed schedule time
-                        // when IDFM does not provide an expected timestamp.
+                        // when the feed does not provide an expected timestamp.
                         if let Some(time_str) = call
                             .expected_arrival_time
                             .as_ref()
@@ -341,7 +341,7 @@ fn sort_estimated_calls_by_time(journey: &mut EstimatedVehicleJourney) {
 
 fn estimated_call_sort_key(call: &EstimatedCall) -> (bool, i64) {
     // Aimed times describe the static journey order and are therefore preferred.
-    // Expected times are only a fallback for calls where IDFM omitted aimed times.
+    // Expected times are only a fallback for calls without aimed times.
     let aimed_timestamp = [
         call.aimed_arrival_time.as_deref(),
         call.aimed_departure_time.as_deref(),
@@ -446,12 +446,12 @@ mod tests {
         use crate::state::AppState;
         use crate::state::LoadedGtfs;
         use dashmap::DashMap;
-        use gtfs_structures::{Gtfs, Stop, StopTime, Trip};
+        use gtfs_structures::{Gtfs, Route, Stop, StopTime, Trip};
         use std::collections::HashMap;
         use std::sync::Arc;
 
         let stop = Arc::new(Stop {
-            id: "IDFM:monomodalStopPlace:12345".to_string(),
+            id: "8600626".to_string(),
             ..Default::default()
         });
 
@@ -461,7 +461,7 @@ mod tests {
             Trip {
                 id: "trip-1".to_string(),
                 service_id: "service-1".to_string(),
-                route_id: "IDFM:route-1".to_string(),
+                route_id: "route-c".to_string(),
                 stop_times: vec![StopTime {
                     stop: stop.clone(),
                     arrival_time: None,
@@ -474,16 +474,25 @@ mod tests {
 
         let mut stops = HashMap::new();
         stops.insert(
-            "IDFM:monomodalStopPlace:12345".to_string(),
+            "8600626".to_string(),
             Arc::new(Stop {
-                id: "IDFM:monomodalStopPlace:12345".to_string(),
+                id: "8600626".to_string(),
                 ..Default::default()
             }),
         );
+        let routes = HashMap::from([(
+            "route-c".to_string(),
+            Route {
+                id: "route-c".to_string(),
+                short_name: Some("C".to_string()),
+                ..Default::default()
+            },
+        )]);
 
         let gtfs = Gtfs {
             trips,
             stops,
+            routes,
             ..Default::default()
         };
 
@@ -500,7 +509,7 @@ mod tests {
                 value: Some("SIRI::trip-1".to_string()),
             }),
             line_ref: Some(ValueWrapper {
-                value: Some("STIF:Line::route-1:".to_string()),
+                value: Some("C".to_string()),
             }),
             operator_ref: None,
             direction_ref: None,
@@ -511,7 +520,7 @@ mod tests {
                 estimated_call: vec![
                     EstimatedCall {
                         stop_point_ref: Some(ValueWrapper {
-                            value: Some("STIF:StopPoint:Q:12345:".to_string()),
+                            value: Some("8600626".to_string()),
                         }),
                         aimed_arrival_time: None,
                         aimed_departure_time: Some("2026-07-12T10:00:00+02:00".to_string()),
@@ -524,7 +533,7 @@ mod tests {
                     },
                     EstimatedCall {
                         stop_point_ref: Some(ValueWrapper {
-                            value: Some("STIF:StopPoint:Q:47874:".to_string()),
+                            value: Some("8600999".to_string()),
                         }),
                         aimed_arrival_time: None,
                         aimed_departure_time: None,
@@ -555,11 +564,11 @@ mod tests {
 
         assert_eq!(feed.entity.len(), 1);
         let update = feed.entity[0].trip_update.as_ref().unwrap();
-        // Emits exactly one update for the mapped static stop ID 12345, skipping the unmapped one.
+        // Emits exactly one update for the mapped static stop, skipping the unmapped one.
         assert_eq!(update.stop_time_update.len(), 1);
         assert_eq!(
             update.stop_time_update[0].stop_id,
-            Some("IDFM:monomodalStopPlace:12345".to_string())
+            Some("8600626".to_string())
         );
     }
 }

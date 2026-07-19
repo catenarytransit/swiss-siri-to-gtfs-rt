@@ -1,8 +1,7 @@
-//! Recovery layer around the existing strict SIRI processor.
+//! Recovery layer around the strict SIRI processor.
 //!
 //! `processor::process_siri` remains the source of truth for exact and clean ordered matches.
-//! This module inspects only journeys that the strict matcher rejects, then appends adaptive,
-//! cached, operator-specific, and ExtraJourney updates after the strict feed has been built.
+//! This module appends adaptive and cached matches after the strict feed has been built.
 
 use crate::adaptive_matching;
 use crate::matching::JourneyMatch;
@@ -12,7 +11,6 @@ use crate::state::{AppState, PlatformInfo, VehicleAssignment};
 use chrono::{DateTime, Utc};
 use gtfs_realtime::{
     FeedEntity, FeedMessage, TripDescriptor, TripUpdate,
-    trip_descriptor::ScheduleRelationship as TripScheduleRelationship,
     trip_update::{
         StopTimeEvent, StopTimeUpdate,
         stop_time_update::ScheduleRelationship as StopTimeScheduleRelationship,
@@ -44,7 +42,6 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
     let mut recovered = Vec::<(FeedEntity, Option<(String, Vec<PlatformInfo>)>)>::new();
     let mut adaptive_matches = 0_u64;
     let mut cached_matches = 0_u64;
-    let mut extra_journeys = 0_u64;
 
     for delivery in &siri.siri.service_delivery.estimated_timetable_delivery {
         for frame in &delivery.estimated_journey_version_frame {
@@ -96,17 +93,6 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                     }
                     continue;
                 }
-
-                /*
-                if journey.extra_journey {
-                    if let Some(entity) =
-                        build_extra_journey_entity(journey, gtfs, stop_alias_index)
-                    {
-                        recovered.push((entity, None));
-                        extra_journeys += 1;
-                    }
-                }
-                    */
             }
         }
     }
@@ -176,7 +162,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
     });
 
     println!(
-        "Recovered matches: adaptive = {adaptive_matches}, cache = {cached_matches}, extra journeys = {extra_journeys}"
+        "Recovered matches: adaptive = {adaptive_matches}, cache = {cached_matches}"
     );
 
     publish_and_cache_feed(state.clone(), feed).await;
@@ -301,90 +287,6 @@ fn build_matched_entity(
     ))
 }
 
-fn build_extra_journey_entity(
-    journey: &EstimatedVehicleJourney,
-    gtfs: &Gtfs,
-    stop_alias_index: &adaptive_matching::StopAliasIndex,
-) -> Option<FeedEntity> {
-    let vehicle_ref = vehicle_key(journey).unwrap_or("unknown");
-    let route_id = journey
-        .line_ref
-        .as_ref()
-        .and_then(|value| value.value.as_deref().and_then(extract_idfm_id))?;
-    if !gtfs.routes.contains_key(&route_id) {
-        return None;
-    }
-
-    let synthetic_id = format!("IDFM:EXTRA:{}", sanitize_entity_id(vehicle_ref));
-    let mut descriptor = TripDescriptor::default();
-    descriptor.trip_id = Some(synthetic_id.clone());
-    descriptor.route_id = Some(route_id);
-    descriptor.schedule_relationship = Some(TripScheduleRelationship::Added as i32);
-
-    let mut update = TripUpdate::default();
-    update.trip = descriptor;
-
-    for call in journey
-        .estimated_calls
-        .as_ref()
-        .into_iter()
-        .flat_map(|calls| &calls.estimated_call)
-    {
-        let Some(stop_ref) = call.stop_point_ref.as_ref() else {
-            continue;
-        };
-        let Some(stop_id) = stop_ref
-            .value
-            .as_deref()
-            .and_then(|value| stop_alias_index.first(value))
-        else {
-            continue;
-        };
-
-        let mut stop_update = StopTimeUpdate::default();
-        stop_update.stop_id = Some(stop_id);
-        if call
-            .arrival_status
-            .as_deref()
-            .is_some_and(is_cancelled_status)
-            || call
-                .departure_status
-                .as_deref()
-                .is_some_and(is_cancelled_status)
-        {
-            stop_update.schedule_relationship = Some(StopTimeScheduleRelationship::Skipped as i32);
-        }
-        if let Some(timestamp) = realtime_or_aimed_arrival(call) {
-            stop_update.arrival = Some(StopTimeEvent {
-                time: Some(timestamp),
-                ..Default::default()
-            });
-        }
-        if let Some(timestamp) = realtime_or_aimed_departure(call) {
-            stop_update.departure = Some(StopTimeEvent {
-                time: Some(timestamp),
-                ..Default::default()
-            });
-        }
-        update.stop_time_update.push(stop_update);
-    }
-
-    if update.stop_time_update.is_empty() {
-        return None;
-    }
-
-    Some(FeedEntity {
-        id: synthetic_id,
-        trip_update: Some(update),
-        ..Default::default()
-    })
-}
-
-fn extract_idfm_id(value: &str) -> Option<String> {
-    let suffix = value.rsplit(':').find(|part| !part.is_empty())?;
-    Some(format!("IDFM:{suffix}"))
-}
-
 fn realtime_or_aimed_arrival(call: &EstimatedCall) -> Option<i64> {
     call.expected_arrival_time
         .as_deref()
@@ -429,19 +331,6 @@ fn sort_for_strict_matcher(journey: &mut EstimatedVehicleJourney) {
         let timestamp = aimed_timestamp.or(expected_timestamp);
         (timestamp.is_none(), timestamp.unwrap_or(i64::MAX))
     });
-}
-
-fn sanitize_entity_id(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect()
 }
 
 fn is_cancelled_status(status: &str) -> bool {

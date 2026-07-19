@@ -2,7 +2,6 @@ mod adaptive_matching;
 mod downloader;
 mod enhanced_processor;
 mod gtfs_manager;
-mod keys;
 mod matching;
 mod matching_diagnostics;
 mod processor;
@@ -11,7 +10,6 @@ mod state;
 
 use anyhow::Result;
 use gtfs_realtime::FeedMessage;
-use keys::KeyManager;
 use prost::Message;
 use state::AppState;
 use std::sync::Arc;
@@ -29,7 +27,7 @@ const SIRI_URL: &str = "https://jbb.ghsq.de/siri/danmark";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("Initializing Ile-de-France GTFS-RT Server...");
+    println!("Initializing Danmark GTFS-RT Server...");
 
     let state = {
         let rt_cache_path = std::env::var("GTFS_RT_CACHE_PATH")

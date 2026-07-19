@@ -316,6 +316,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "danmark-gtfsrt"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "chrono-tz",
+ "dashmap",
+ "futures-util",
+ "gtfs-realtime",
+ "gtfs-structures",
+ "prost",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tikv-jemallocator",
+ "tokio",
+ "warp",
+]
+
+[[package]]
 name = "dashmap"
 version = "6.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1003,26 +1023,6 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
-]
-
-[[package]]
-name = "ile-de-france-gtfsrt"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "chrono-tz",
- "dashmap",
- "futures-util",
- "gtfs-realtime",
- "gtfs-structures",
- "prost",
- "reqwest",
- "serde",
- "serde_json",
- "tikv-jemallocator",
- "tokio",
- "warp",
 ]
 
 [[package]]

@@ -1,0 +1,1261 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1011,5 +1011,5 @@
+ [[package]]
+-name = "ile-de-france-gtfsrt"
++name = "danmark-gtfsrt"
+ version = "0.1.0"
+ dependencies = [
+  "anyhow",
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,5 +1,5 @@
+ [package]
+-name = "ile-de-france-gtfsrt"
++name = "danmark-gtfsrt"
+ version = "0.1.0"
+ edition = "2024"
+ 
+diff --git a/src/adaptive_matching.rs b/src/adaptive_matching.rs
+--- a/src/adaptive_matching.rs
++++ b/src/adaptive_matching.rs
+@@ -1,7 +1,6 @@
+-//! Tolerant IDFM SIRI -> GTFS matching.
++//! Tolerant SIRI -> GTFS matching for the Danish feed.
+ //!
+ //! The primary matcher intentionally remains strict. This module is the recovery path for
+-//! feeds where EstimatedCalls are duplicated, contain aliases, are not in stop order, or
+-//! represent point observations from RATP-SIV / MeC_Bus_PC rather than one clean trajectory.
++//! feeds where EstimatedCalls are duplicated or are not in stop order.
+ 
+ use crate::matching::{JourneyMatch, MatchKind};
+@@ -10,7 +10,7 @@
+ use crate::siri_models::{EstimatedCall, EstimatedVehicleJourney};
+ use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
+-use chrono_tz::{Europe::Paris, Tz};
++use chrono_tz::{Europe::Copenhagen, Tz};
+ use gtfs_structures::{Exception, Gtfs, Trip};
+-use std::collections::{HashMap, HashSet};
++use std::collections::HashSet;
+ 
+ const CACHE_MAX_MEAN_DIFFERENCE_SECONDS: i64 = 10 * 60;
+@@ -18,31 +18,22 @@
+ #[derive(Debug, Default)]
+ pub struct StopAliasIndex {
+-    by_suffix: HashMap<String, Vec<String>>,
++    stop_ids: HashSet<String>,
+ }
+ 
+ impl StopAliasIndex {
+     pub fn build(gtfs: &Gtfs) -> Self {
+-        let mut by_suffix = HashMap::<String, Vec<String>>::new();
+-        for stop_id in gtfs.stops.keys() {
+-            if let Some(suffix) = stop_id.rsplit(':').next() {
+-                by_suffix
+-                    .entry(suffix.to_owned())
+-                    .or_default()
+-                    .push(stop_id.clone());
+-            }
++        Self {
++            stop_ids: gtfs.stops.keys().cloned().collect(),
+         }
+-        for aliases in by_suffix.values_mut() {
+-            aliases.sort_unstable();
+-            aliases.dedup();
+-        }
+-        Self { by_suffix }
+     }
+ 
+     pub fn resolve(&self, value: &str) -> Vec<String> {
+-        let Some(suffix) = value.rsplit(':').find(|part| !part.is_empty()) else {
+-            return Vec::new();
+-        };
+-        self.by_suffix.get(suffix).cloned().unwrap_or_default()
++        let stop_id = value.trim();
++        if self.stop_ids.contains(stop_id) {
++            vec![stop_id.to_owned()]
++        } else {
++            Vec::new()
++        }
+     }
+ 
+     pub fn first(&self, value: &str) -> Option<String> {
+@@ -90,10 +90,14 @@
+     match_index: &crate::matching::GtfsMatchIndex,
+     aliases: &StopAliasIndex,
+ ) -> Option<JourneyMatch> {
+-    let route_id = journey
++    let line_ref = journey
+         .line_ref
+         .as_ref()
+-        .and_then(|value| value.value.as_deref().and_then(extract_idfm_id))?;
++        .and_then(|value| value.value.as_deref())?;
++    let route_ids = match_index.route_ids_for_line_ref(line_ref);
++    if route_ids.is_empty() {
++        return None;
++    }
+     let call_count = journey
+         .estimated_calls
+         .as_ref()
+@@ -103,43 +107,37 @@
+         return None;
+     }
+ 
+-    let operator_trajectory = journey.operator_ref.as_ref().is_some_and(|operator| {
+-        operator
+-            .value
+-            .as_deref()
+-            .is_some_and(is_point_observation_operator)
+-    });
+     let destination_aliases = journey
+         .destination_ref
+         .as_ref()
+         .and_then(|value| value.value.as_deref().map(|value| aliases.resolve(value)))
+         .unwrap_or_default();
+-    let timezone = timezone_for_route(gtfs, &route_id);
+-    let service_dates = candidate_service_dates(&calls, timezone);
+-    let route_type = gtfs
+-        .routes
+-        .get(&route_id)
+-        .map(|route| format!("{:?}", route.route_type));
+-    let (early_seconds, late_seconds) = time_window(route_type.as_deref(), operator_trajectory);
+ 
+-    // Match destination in progressively weaker passes. This mirrors the Java fallback:
+-    // terminus first, destination anywhere second, then no destination restriction.
++    // Prefer the terminus, then any matching destination stop, then no destination restriction.
+     for destination_mode in 0..=2 {
+         let mut best: Option<AdaptiveScore> = None;
+ 
+-        for trip_id in match_index.trip_ids_for_route(&route_id) {
+-            let trip = &gtfs.trips[trip_id];
+-            if !destination_matches(trip, &destination_aliases, gtfs, destination_mode) {
+-                continue;
+-            }
++        for route_id in route_ids {
++            let timezone = timezone_for_route(gtfs, route_id);
++            let service_dates = candidate_service_dates(&calls, timezone);
++            let route_type = gtfs
++                .routes
++                .get(route_id)
++                .map(|route| format!("{:?}", route.route_type));
++            let (early_seconds, late_seconds) = time_window(route_type.as_deref());
+ 
+-            for service_date in &service_dates {
+-                if !service_runs_on(gtfs, &trip.service_id, *service_date) {
++            for trip_id in match_index.trip_ids_for_route(route_id) {
++                let trip = &gtfs.trips[trip_id];
++                if !destination_matches(trip, &destination_aliases, gtfs, destination_mode) {
+                     continue;
+                 }
+ 
+-                let score = if operator_trajectory {
+-                    score_operator_trajectory(
++                for service_date in &service_dates {
++                    if !service_runs_on(gtfs, &trip.service_id, *service_date) {
++                        continue;
++                    }
++
++                    let Some(score) = score_unordered_calls(
+                         trip,
+                         &calls,
+                         *service_date,
+@@ -148,26 +146,15 @@
+                         early_seconds,
+                         late_seconds,
+                         call_count,
+-                    )
+-                } else {
+-                    score_unordered_calls(
+-                        trip,
+-                        &calls,
+-                        *service_date,
+-                        timezone,
+-                        gtfs,
+-                        early_seconds,
+-                        late_seconds,
+-                        call_count,
+-                    )
+-                };
+-
+-                let Some(score) = score else { continue };
+-                if best
+-                    .as_ref()
+-                    .is_none_or(|current| score.is_better_than(current))
+-                {
+-                    best = Some(score);
++                    ) else {
++                        continue;
++                    };
++                    if best
++                        .as_ref()
++                        .is_none_or(|current| score.is_better_than(current))
++                    {
++                        best = Some(score);
++                    }
+                 }
+             }
+         }
+@@ -189,9 +189,11 @@
+     let trip = gtfs.trips.get(trip_id)?;
+-    let route_id = journey
++    let line_ref = journey
+         .line_ref
+         .as_ref()
+-        .and_then(|value| value.value.as_deref().and_then(extract_idfm_id))?;
+-    if trip.route_id != route_id {
++        .and_then(|value| value.value.as_deref())?
++        .trim();
++    let route = gtfs.routes.get(&trip.route_id)?;
++    if route.short_name.as_deref().map(str::trim) != Some(line_ref) {
+         return None;
+     }
+ 
+@@ -200,11 +202,8 @@
+         .as_ref()
+         .map_or(0, |calls| calls.estimated_call.len());
+     let calls = resolve_calls(journey, aliases);
+-    let timezone = timezone_for_route(gtfs, &route_id);
+-    let route_type = gtfs
+-        .routes
+-        .get(&route_id)
+-        .map(|route| format!("{:?}", route.route_type));
+-    let (early, late) = time_window(route_type.as_deref(), false);
++    let timezone = timezone_for_route(gtfs, &trip.route_id);
++    let route_type = Some(format!("{:?}", route.route_type));
++    let (early, late) = time_window(route_type.as_deref());
+ 
+     let mut best: Option<AdaptiveScore> = None;
+@@ -355,86 +355 @@
+-fn score_operator_trajectory(
+-    trip: &Trip,
+-    calls: &[ResolvedCall],
+-    service_date: NaiveDate,
+-    timezone: Tz,
+-    gtfs: &Gtfs,
+-    early_seconds: i64,
+-    late_seconds: i64,
+-    call_count: usize,
+-) -> Option<AdaptiveScore> {
+-    // RATP-SIV and MeC_Bus_PC may expose observations rather than a clean ordered
+-    // trajectory. Match overlapping points and rank by delay consistency (MAD), not order.
+-    let mut delays = Vec::<(usize, i64, bool)>::new();
+-    let mut output_indices = vec![usize::MAX; call_count];
+-    for call in calls {
+-        let mut best: Option<(usize, i64, bool)> = None;
+-        for (stop_index, stop_time) in trip.stop_times.iter().enumerate() {
+-            let (matches, used_parent) = call_matches_stop(call, &stop_time.stop.id, gtfs);
+-            if !matches {
+-                continue;
+-            }
+-            let Some(seconds) = stop_time.departure_time.or(stop_time.arrival_time) else {
+-                continue;
+-            };
+-            let Some(delay) =
+-                signed_time_difference(call.observed, service_date, seconds, timezone)
+-            else {
+-                continue;
+-            };
+-            if delay < early_seconds || delay > late_seconds {
+-                continue;
+-            }
+-            if best.is_none_or(|(_, current, _)| delay.abs() < current.abs()) {
+-                best = Some((stop_index, delay, used_parent));
+-            }
+-        }
+-        if let Some((stop_index, delay, used_parent)) = best {
+-            output_indices[call.original_index] = stop_index;
+-            delays.push((stop_index, delay, used_parent));
+-        }
+-    }
+-    if delays.is_empty() {
+-        return None;
+-    }
+-    let mut sorted = delays
+-        .iter()
+-        .map(|(_, delay, _)| *delay)
+-        .collect::<Vec<_>>();
+-    sorted.sort_unstable();
+-    let median = sorted[sorted.len() / 2];
+-    let mut deviations = sorted
+-        .iter()
+-        .map(|delay| (*delay - median).abs())
+-        .collect::<Vec<_>>();
+-    deviations.sort_unstable();
+-    let mad = deviations[deviations.len() / 2];
+-    let mad_limit = if trip.route_id.contains("Metro") {
+-        300
+-    } else {
+-        480
+-    };
+-    if mad > mad_limit {
+-        return None;
+-    }
+-    let total = delays
+-        .iter()
+-        .map(|(_, delay, _)| i128::from(delay.abs()))
+-        .sum();
+-    let max_difference = delays
+-        .iter()
+-        .map(|(_, delay, _)| delay.abs())
+-        .max()
+-        .unwrap_or(0);
+-    Some(AdaptiveScore {
+-        trip_id: trip.id.clone(),
+-        service_date,
+-        matched_calls: delays.len(),
+-        total_difference: total,
+-        mean_difference: (total / delays.len() as i128) as i64,
+-        max_difference,
+-        stop_indices: output_indices,
+-        used_parent_station_match: delays.iter().any(|(_, _, parent)| *parent),
+-    })
+-}
+-
+ fn call_matches_stop(call: &ResolvedCall, stop_id: &str, gtfs: &Gtfs) -> (bool, bool) {
+@@ -498,6 +498,3 @@
+-fn time_window(route_type: Option<&str>, operator_trajectory: bool) -> (i64, i64) {
+-    if operator_trajectory {
+-        return (-20 * 60, 30 * 60);
+-    }
++fn time_window(route_type: Option<&str>) -> (i64, i64) {
+     match route_type {
+         Some("Tramway" | "Subway" | "Metro" | "Tram") => (-5 * 60, 15 * 60),
+@@ -509,10 +509 @@
+-fn is_point_observation_operator(value: &str) -> bool {
+-    value.starts_with("RATP-SIV:") || value.starts_with("MeC_Bus_PC:Operator:")
+-}
+-
+-fn extract_idfm_id(value: &str) -> Option<String> {
+-    let id = value.rsplit(':').find(|part| !part.is_empty())?;
+-    Some(format!("IDFM:{id}"))
+-}
+-
+ fn parse_timestamp(value: &str) -> Option<i64> {
+@@ -526,7 +526,7 @@
+         .iter()
+         .filter(|agency| agency_id.is_none() || agency.id.as_ref() == agency_id)
+         .find_map(|agency| agency.timezone.parse::<Tz>().ok())
+-        .unwrap_or(Paris)
++        .unwrap_or(Copenhagen)
+ }
+ 
+ fn candidate_service_dates(calls: &[ResolvedCall], timezone: Tz) -> Vec<NaiveDate> {
+@@ -602,14 +602,7 @@
+-    #[test]
+-    fn identifies_point_observation_operators() {
+-        assert!(is_point_observation_operator("RATP-SIV:Operator:foo"));
+-        assert!(is_point_observation_operator("MeC_Bus_PC:Operator:foo"));
+-        assert!(!is_point_observation_operator("SNCF:Operator:foo"));
+-    }
+-
+     #[test]
+     fn route_windows_are_mode_specific() {
+-        assert_eq!(time_window(Some("Subway"), false), (-300, 900));
+-        assert_eq!(time_window(Some("Bus"), false), (-300, 1800));
+-        assert_eq!(time_window(Some("Rail"), false), (-300, 1200));
++        assert_eq!(time_window(Some("Subway")), (-300, 900));
++        assert_eq!(time_window(Some("Bus")), (-300, 1800));
++        assert_eq!(time_window(Some("Rail")), (-300, 1200));
+     }
+ }
+diff --git a/src/downloader.rs b/src/downloader.rs
+--- a/src/downloader.rs
++++ b/src/downloader.rs
+@@ -1,4 +1,3 @@
+ use crate::enhanced_processor::process_siri;
+-use crate::keys::KeyManager;
+ use crate::siri_models::SiriResponse;
+ use crate::state::AppState;
+@@ -49,6 +49,5 @@
+             }
+ 
+-            // The user requested: "fetch this url every  100s"
+             tokio::time::sleep(Duration::from_secs(100)).await;
+         }
+     });
+diff --git a/src/enhanced_processor.rs b/src/enhanced_processor.rs
+--- a/src/enhanced_processor.rs
++++ b/src/enhanced_processor.rs
+@@ -1,7 +1,6 @@
+-//! Recovery layer around the existing strict SIRI processor.
++//! Recovery layer around the strict SIRI processor.
+ //!
+ //! `processor::process_siri` remains the source of truth for exact and clean ordered matches.
+-//! This module inspects only journeys that the strict matcher rejects, then appends adaptive,
+-//! cached, operator-specific, and ExtraJourney updates after the strict feed has been built.
++//! This module appends adaptive and cached matches after the strict feed has been built.
+ 
+ use crate::adaptive_matching;
+@@ -14,5 +14,4 @@
+ use chrono::{DateTime, Utc};
+ use gtfs_realtime::{
+     FeedEntity, FeedMessage, TripDescriptor, TripUpdate,
+-    trip_descriptor::ScheduleRelationship as TripScheduleRelationship,
+     trip_update::{
+@@ -46,6 +46,5 @@
+     let mut recovered = Vec::<(FeedEntity, Option<(String, Vec<PlatformInfo>)>)>::new();
+     let mut adaptive_matches = 0_u64;
+     let mut cached_matches = 0_u64;
+-    let mut extra_journeys = 0_u64;
+ 
+     for delivery in &siri.siri.service_delivery.estimated_timetable_delivery {
+@@ -96,17 +96,6 @@
+                     }
+                     continue;
+                 }
+-
+-                /*
+-                if journey.extra_journey {
+-                    if let Some(entity) =
+-                        build_extra_journey_entity(journey, gtfs, stop_alias_index)
+-                    {
+-                        recovered.push((entity, None));
+-                        extra_journeys += 1;
+-                    }
+-                }
+-                    */
+             }
+         }
+     }
+@@ -180,5 +180,5 @@
+     println!(
+-        "Recovered matches: adaptive = {adaptive_matches}, cache = {cached_matches}, extra journeys = {extra_journeys}"
++        "Recovered matches: adaptive = {adaptive_matches}, cache = {cached_matches}"
+     );
+ 
+     publish_and_cache_feed(state.clone(), feed).await;
+@@ -306,85 +306 @@
+-fn build_extra_journey_entity(
+-    journey: &EstimatedVehicleJourney,
+-    gtfs: &Gtfs,
+-    stop_alias_index: &adaptive_matching::StopAliasIndex,
+-) -> Option<FeedEntity> {
+-    let vehicle_ref = vehicle_key(journey).unwrap_or("unknown");
+-    let route_id = journey
+-        .line_ref
+-        .as_ref()
+-        .and_then(|value| value.value.as_deref().and_then(extract_idfm_id))?;
+-    if !gtfs.routes.contains_key(&route_id) {
+-        return None;
+-    }
+-
+-    let synthetic_id = format!("IDFM:EXTRA:{}", sanitize_entity_id(vehicle_ref));
+-    let mut descriptor = TripDescriptor::default();
+-    descriptor.trip_id = Some(synthetic_id.clone());
+-    descriptor.route_id = Some(route_id);
+-    descriptor.schedule_relationship = Some(TripScheduleRelationship::Added as i32);
+-
+-    let mut update = TripUpdate::default();
+-    update.trip = descriptor;
+-
+-    for call in journey
+-        .estimated_calls
+-        .as_ref()
+-        .into_iter()
+-        .flat_map(|calls| &calls.estimated_call)
+-    {
+-        let Some(stop_ref) = call.stop_point_ref.as_ref() else {
+-            continue;
+-        };
+-        let Some(stop_id) = stop_ref
+-            .value
+-            .as_deref()
+-            .and_then(|value| stop_alias_index.first(value))
+-        else {
+-            continue;
+-        };
+-
+-        let mut stop_update = StopTimeUpdate::default();
+-        stop_update.stop_id = Some(stop_id);
+-        if call
+-            .arrival_status
+-            .as_deref()
+-            .is_some_and(is_cancelled_status)
+-            || call
+-                .departure_status
+-                .as_deref()
+-                .is_some_and(is_cancelled_status)
+-        {
+-            stop_update.schedule_relationship = Some(StopTimeScheduleRelationship::Skipped as i32);
+-        }
+-        if let Some(timestamp) = realtime_or_aimed_arrival(call) {
+-            stop_update.arrival = Some(StopTimeEvent {
+-                time: Some(timestamp),
+-                ..Default::default()
+-            });
+-        }
+-        if let Some(timestamp) = realtime_or_aimed_departure(call) {
+-            stop_update.departure = Some(StopTimeEvent {
+-                time: Some(timestamp),
+-                ..Default::default()
+-            });
+-        }
+-        update.stop_time_update.push(stop_update);
+-    }
+-
+-    if update.stop_time_update.is_empty() {
+-        return None;
+-    }
+-
+-    Some(FeedEntity {
+-        id: synthetic_id,
+-        trip_update: Some(update),
+-        ..Default::default()
+-    })
+-}
+-
+-fn extract_idfm_id(value: &str) -> Option<String> {
+-    let suffix = value.rsplit(':').find(|part| !part.is_empty())?;
+-    Some(format!("IDFM:{suffix}"))
+-}
+-
+ fn realtime_or_aimed_arrival(call: &EstimatedCall) -> Option<i64> {
+@@ -436,14 +436 @@
+-fn sanitize_entity_id(value: &str) -> String {
+-    value
+-        .chars()
+-        .map(|character| {
+-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+-                character
+-            } else {
+-                '-'
+-            }
+-        })
+-        .collect()
+-}
+-
+ fn is_cancelled_status(status: &str) -> bool {
+diff --git a/src/gtfs_manager.rs b/src/gtfs_manager.rs
+--- a/src/gtfs_manager.rs
++++ b/src/gtfs_manager.rs
+@@ -15,5 +15,5 @@
+     let cache_path = std::env::var("GTFS_CACHE_PATH")
+         .map(PathBuf::from)
+-        .unwrap_or_else(|_| PathBuf::from("./idfm-gtfs.zip"));
++        .unwrap_or_else(|_| PathBuf::from("./danmark-gtfs.zip"));
+ 
+     if let Some(parent) = cache_path.parent() {
+diff --git a/src/keys.rs b/src/keys.rs
+deleted file mode 100644
+--- a/src/keys.rs
++++ /dev/null
+@@ -1,42 +0,0 @@
+-use std::fs::File;
+-use std::io::{self, BufRead};
+-use std::path::Path;
+-use std::sync::atomic::{AtomicUsize, Ordering};
+-
+-pub struct KeyManager {
+-    keys: Vec<String>,
+-    current_index: AtomicUsize,
+-}
+-
+-impl KeyManager {
+-    pub fn new<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+-        let file = File::open(path)?;
+-        let reader = io::BufReader::new(file);
+-        let mut keys = Vec::new();
+-
+-        for line in reader.lines() {
+-            let line = line?;
+-            let trimmed = line.trim();
+-            if !trimmed.is_empty() {
+-                keys.push(trimmed.to_string());
+-            }
+-        }
+-
+-        if keys.is_empty() {
+-            return Err(io::Error::new(
+-                io::ErrorKind::InvalidData,
+-                "No keys found in file",
+-            ));
+-        }
+-
+-        Ok(Self {
+-            keys,
+-            current_index: AtomicUsize::new(0),
+-        })
+-    }
+-
+-    pub fn get_next_key(&self) -> String {
+-        let index = self.current_index.fetch_add(1, Ordering::Relaxed);
+-        self.keys[index % self.keys.len()].clone()
+-    }
+-}
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -2,7 +2,6 @@
+ mod downloader;
+ mod enhanced_processor;
+ mod gtfs_manager;
+-mod keys;
+ mod matching;
+ mod matching_diagnostics;
+ mod processor;
+@@ -14,5 +14,4 @@
+ use anyhow::Result;
+ use gtfs_realtime::FeedMessage;
+-use keys::KeyManager;
+ use prost::Message;
+ use state::AppState;
+@@ -32,5 +32,5 @@
+ #[tokio::main]
+ async fn main() -> Result<()> {
+-    println!("Initializing Ile-de-France GTFS-RT Server...");
++    println!("Initializing Danmark GTFS-RT Server...");
+ 
+     let state = {
+diff --git a/src/matching.rs b/src/matching.rs
+--- a/src/matching.rs
++++ b/src/matching.rs
+@@ -6,5 +6,5 @@
+ use crate::siri_models::EstimatedVehicleJourney;
+ use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
+-use chrono_tz::{Europe::Paris, Tz};
++use chrono_tz::{Europe::Copenhagen, Tz};
+ use gtfs_structures::{Exception, Gtfs, Trip};
+ use std::collections::{HashMap, HashSet};
+@@ -64,9 +64,9 @@
+     exact_trip_ids: HashMap<String, Vec<String>>,
+     trips_by_route: HashMap<String, Vec<String>>,
++    route_ids_by_short_name: HashMap<String, Vec<String>>,
+     route_timezones: HashMap<String, Tz>,
+     service_exceptions: HashMap<String, HashMap<NaiveDate, bool>>,
+     canonical_stop_ids: HashMap<String, String>,
+-    stop_ids_by_suffix: HashMap<String, Vec<String>>,
+ }
+ 
+ #[derive(Debug)]
+@@ -131,6 +131,6 @@
+             .agencies
+             .iter()
+             .find_map(|agency| agency.timezone.parse::<Tz>().ok())
+-            .unwrap_or(Paris);
++            .unwrap_or(Copenhagen);
+ 
+         let agency_timezones = gtfs
+@@ -163,17 +163,21 @@
+         let canonical_stop_ids = build_canonical_stop_ids(gtfs);
+ 
+-        let mut stop_ids_by_suffix = HashMap::<String, Vec<String>>::new();
+-        for stop_id in gtfs.stops.keys() {
+-            if let Some(suffix) = stop_id.rsplit(':').next() {
+-                stop_ids_by_suffix
+-                    .entry(suffix.to_owned())
+-                    .or_default()
+-                    .push(stop_id.clone());
++        let mut route_ids_by_short_name = HashMap::<String, Vec<String>>::new();
++        for (route_id, route) in &gtfs.routes {
++            let Some(short_name) = route.short_name.as_deref().map(str::trim) else {
++                continue;
++            };
++            if short_name.is_empty() {
++                continue;
+             }
++            route_ids_by_short_name
++                .entry(short_name.to_owned())
++                .or_default()
++                .push(route_id.clone());
+         }
+-        for ids in stop_ids_by_suffix.values_mut() {
+-            ids.sort_unstable();
+-            ids.dedup();
++        for route_ids in route_ids_by_short_name.values_mut() {
++            route_ids.sort_unstable();
++            route_ids.dedup();
+         }
+ 
+         let mut grouped_directions = HashMap::<(String, Vec<String>), Vec<String>>::new();
+@@ -256,22 +256,27 @@
+             directions,
+             exact_trip_ids,
+             trips_by_route,
++            route_ids_by_short_name,
+             route_timezones,
+             service_exceptions,
+             canonical_stop_ids,
+-            stop_ids_by_suffix,
+         }
+     }
+ 
+     pub fn resolve_siri_stop_ids(&self, value: &str) -> Vec<String> {
+-        let Some(suffix) = siri_reference_suffix(value) else {
+-            return Vec::new();
+-        };
++        let stop_id = value.trim();
++        if self.canonical_stop_ids.contains_key(stop_id) {
++            vec![stop_id.to_owned()]
++        } else {
++            Vec::new()
++        }
++    }
+ 
+-        self.stop_ids_by_suffix
+-            .get(suffix)
+-            .cloned()
+-            .unwrap_or_default()
++    pub fn route_ids_for_line_ref(&self, value: &str) -> &[String] {
++        self.route_ids_by_short_name
++            .get(value.trim())
++            .map(Vec::as_slice)
++            .unwrap_or(&[])
+     }
+ 
+     pub fn trip_ids_for_route(&self, route_id: &str) -> &[String] {
+@@ -299,11 +299,21 @@
+             return None;
+         }
+ 
+-        let target_route_id = journey
++        let line_ref = journey
+             .line_ref
+             .as_ref()
+-            .and_then(|reference| reference.value.as_deref().and_then(extract_idfm_id))?;
+-        let patterns = self.directions.get(&target_route_id)?;
++            .and_then(|reference| reference.value.as_deref())?;
++        let route_ids = self.route_ids_for_line_ref(line_ref);
++        if route_ids.is_empty() {
++            return None;
++        }
++        let patterns = route_ids
++            .iter()
++            .flat_map(|route_id| self.directions.get(route_id).into_iter().flatten())
++            .collect::<Vec<_>>();
++        if patterns.is_empty() {
++            return None;
++        }
+         let target_destination = journey
+             .destination_ref
+             .as_ref()
+@@ -311,12 +321,13 @@
+             .map(|dest_ref| self.resolve_siri_stop_ids(dest_ref))
+             .unwrap_or_default();
+ 
+-        let mut candidate_patterns = patterns.iter().collect::<Vec<_>>();
++        let mut candidate_patterns = patterns.clone();
+         let mut destination_filter_applied = false;
+ 
+         if !target_destination.is_empty() {
+             let exact = patterns
+                 .iter()
++                .copied()
+                 .filter(|pattern| target_destination.contains(&pattern.destination_stop_id))
+                 .collect::<Vec<_>>();
+ 
+@@ -326,6 +337,7 @@
+             } else {
+                 let parent = patterns
+                     .iter()
++                    .copied()
+                     .filter(|pattern| {
+                         target_destination
+                             .iter()
+@@ -389,7 +389,11 @@
+         let indexed_trip_ids = self.exact_trip_ids.get(exact_key)?;
+-        let target_route_id = journey
++        let target_route_ids = journey
+             .line_ref
+             .as_ref()
+-            .and_then(|reference| reference.value.as_deref().and_then(extract_idfm_id));
++            .and_then(|reference| reference.value.as_deref())
++            .map(|line_ref| self.route_ids_for_line_ref(line_ref));
++        if target_route_ids.is_some_and(|route_ids| route_ids.is_empty()) {
++            return None;
++        }
+         let target_destination = journey
+             .destination_ref
+@@ -401,10 +401,10 @@
+         let mut candidates = indexed_trip_ids
+             .iter()
+             .filter(|trip_id| {
+-                target_route_id.as_ref().is_none_or(|route_id| {
+-                    gtfs.trips
+-                        .get(*trip_id)
+-                        .is_some_and(|trip| trip.route_id == *route_id)
++                target_route_ids.is_none_or(|route_ids| {
++                    gtfs.trips.get(*trip_id).is_some_and(|trip| {
++                        route_ids.iter().any(|route_id| route_id == &trip.route_id)
++                    })
+                 })
+             })
+             .collect::<Vec<_>>();
+@@ -495,15 +495,24 @@
+             return Err(MatchMissReason::NoUsableTimes);
+         }
+ 
+-        let target_route_id = journey
++        let line_ref = journey
+             .line_ref
+             .as_ref()
+-            .and_then(|reference| reference.value.as_deref().and_then(extract_idfm_id))
++            .and_then(|reference| reference.value.as_deref())
++            .map(str::trim)
++            .filter(|value| !value.is_empty())
+             .ok_or(MatchMissReason::MissingLineRef)?;
+-        let patterns = self
+-            .directions
+-            .get(&target_route_id)
+-            .ok_or(MatchMissReason::RouteNotFound)?;
++        let route_ids = self.route_ids_for_line_ref(line_ref);
++        if route_ids.is_empty() {
++            return Err(MatchMissReason::RouteNotFound);
++        }
++        let patterns = route_ids
++            .iter()
++            .flat_map(|route_id| self.directions.get(route_id).into_iter().flatten())
++            .collect::<Vec<_>>();
++        if patterns.is_empty() {
++            return Err(MatchMissReason::RouteNotFound);
++        }
+         let target_destination = journey
+             .destination_ref
+             .as_ref()
+@@ -514,6 +523,7 @@
+         let exact_destination_patterns = if !target_destination.is_empty() {
+             let exact = patterns
+                 .iter()
++                .copied()
+                 .filter(|pattern| target_destination.contains(&pattern.destination_stop_id))
+                 .collect::<Vec<_>>();
+             (!exact.is_empty()).then_some(exact)
+@@ -525,6 +535,7 @@
+             if exact_destination_patterns.is_none() && !target_destination.is_empty() {
+                 let parent = patterns
+                     .iter()
++                    .copied()
+                     .filter(|pattern| {
+                         target_destination
+                             .iter()
+@@ -540,13 +551,10 @@
+             Some(exact) => exact,
+             None => match parent_destination_patterns {
+                 Some(parent) => parent,
+-                None => patterns.iter().collect::<Vec<_>>(),
++                None => patterns,
+             },
+         };
+ 
+-        let timezone = self.timezone_for_route(&target_route_id);
+-        let service_dates = candidate_service_dates(observed_calls, timezone)
+-            .ok_or(MatchMissReason::NoUsableTimes)?;
+         let mut saw_alignment = false;
+         let mut saw_active_service = false;
+ 
+@@ -568,6 +576,10 @@
+ 
+                 for trip_id in &pattern.trip_ids {
+                     let Some(trip) = gtfs.trips.get(trip_id) else {
++                        continue;
++                    };
++                    let timezone = self.timezone_for_route(&trip.route_id);
++                    let Some(service_dates) = candidate_service_dates(observed_calls, timezone) else {
+                         continue;
+                     };
+ 
+@@ -737,5 +737,8 @@
+     fn timezone_for_route(&self, route_id: &str) -> Tz {
+-        self.route_timezones.get(route_id).copied().unwrap_or(Paris)
++        self.route_timezones
++            .get(route_id)
++            .copied()
++            .unwrap_or(Copenhagen)
+     }
+ 
+     fn observed_calls(&self, journey: &EstimatedVehicleJourney) -> Vec<ObservedCall> {
+@@ -814,12 +814,10 @@
+ fn extract_siri_trip_key(value: &str) -> Option<&str> {
+-    let (_, value) = value.split_once("::")?;
+-    let value = value.trim_end_matches(":LOC").trim_end_matches(':');
++    let value = value.trim();
++    let value = value
++        .rsplit_once("::")
++        .map_or(value, |(_, trip_id)| trip_id)
++        .trim_end_matches(':');
+     (!value.is_empty()).then_some(value)
+ }
+ 
+-fn extract_idfm_id(value: &str) -> Option<String> {
+-    let id = value.rsplit(':').find(|part| !part.is_empty())?;
+-    Some(format!("IDFM:{id}"))
+-}
+-
+ fn parse_timestamp(value: &str) -> Option<i64> {
+@@ -1111,6 +1111,2 @@
+-fn siri_reference_suffix(value: &str) -> Option<&str> {
+-    value.rsplit(':').find(|part| !part.is_empty())
+-}
+-
+ #[cfg(test)]
+ mod tests {
+@@ -1250,12 +1250,20 @@
+     #[test]
+-    fn resolves_sncf_stop_area_to_namespaced_gtfs_stop() {
++    fn resolves_direct_stop_ids_and_preserves_child_stops() {
+         use gtfs_structures::Stop;
+         use std::collections::HashMap;
+         let mut stops = HashMap::new();
+         stops.insert(
+-            "IDFM:monomodalStopPlace:47874".to_string(),
++            "8600626".to_string(),
+             Arc::new(Stop {
+-                id: "IDFM:monomodalStopPlace:47874".to_string(),
++                id: "8600626".to_string(),
++                ..Default::default()
++            }),
++        );
++        stops.insert(
++            "8600626-1".to_string(),
++            Arc::new(Stop {
++                id: "8600626-1".to_string(),
++                parent_station: Some("8600626".to_string()),
+                 ..Default::default()
+             }),
+         );
+@@ -1264,8 +1272,46 @@
+             ..Default::default()
+         };
+         let index = GtfsMatchIndex::build(&gtfs);
+-        let resolved = index.resolve_siri_stop_ids("STIF:StopArea:SP:47874:");
+-        assert_eq!(resolved, vec!["IDFM:monomodalStopPlace:47874".to_string()]);
++        assert_eq!(
++            index.resolve_siri_stop_ids("8600626"),
++            vec!["8600626".to_string()]
++        );
++        assert_eq!(
++            index.resolve_siri_stop_ids("8600626-1"),
++            vec!["8600626-1".to_string()]
++        );
++    }
++
++    #[test]
++    fn line_ref_resolves_every_route_with_the_same_short_name() {
++        use gtfs_structures::Route;
++        use std::collections::HashMap;
++        let routes = HashMap::from([
++            (
++                "route-a".to_string(),
++                Route {
++                    id: "route-a".to_string(),
++                    short_name: Some("C".to_string()),
++                    ..Default::default()
++                },
++            ),
++            (
++                "route-b".to_string(),
++                Route {
++                    id: "route-b".to_string(),
++                    short_name: Some("C".to_string()),
++                    ..Default::default()
++                },
++            ),
++        ]);
++        let index = GtfsMatchIndex::build(&Gtfs {
++            routes,
++            ..Default::default()
++        });
++        assert_eq!(
++            index.route_ids_for_line_ref("C"),
++            &["route-a".to_string(), "route-b".to_string()]
++        );
+     }
+ 
+     #[test]
+@@ -1273,10 +1273,10 @@
+         use crate::siri_models::{
+             EstimatedCall, EstimatedCalls, EstimatedVehicleJourney, ValueWrapper,
+         };
+-        use gtfs_structures::StopTime;
++        use gtfs_structures::{Route, StopTime};
+         use std::collections::HashMap;
+ 
+         let stop = Arc::new(Stop {
+-            id: "IDFM:monomodalStopPlace:12345".to_string(),
++            id: "8600626".to_string(),
+             ..Default::default()
+         });
+@@ -1287,5 +1287,5 @@
+             Trip {
+                 id: "some-uuid-trip-id".to_string(),
+                 service_id: "service-id".to_string(),
+-                route_id: "IDFM:route-id".to_string(),
++                route_id: "route-c".to_string(),
+                 stop_times: vec![StopTime {
+@@ -1301,22 +1301,31 @@
+         let mut stops = HashMap::new();
+         stops.insert(
+-            "IDFM:monomodalStopPlace:12345".to_string(),
++            "8600626".to_string(),
+             Arc::new(Stop {
+-                id: "IDFM:monomodalStopPlace:12345".to_string(),
++                id: "8600626".to_string(),
+                 ..Default::default()
+             }),
+         );
+         stops.insert(
+-            "IDFM:monomodalStopPlace:47874".to_string(),
++            "8600999".to_string(),
+             Arc::new(Stop {
+-                id: "IDFM:monomodalStopPlace:47874".to_string(),
++                id: "8600999".to_string(),
+                 ..Default::default()
+             }),
+         );
++        let routes = HashMap::from([(
++            "route-c".to_string(),
++            Route {
++                id: "route-c".to_string(),
++                short_name: Some("C".to_string()),
++                ..Default::default()
++            },
++        )]);
+ 
+         let gtfs = Gtfs {
+             trips,
+             stops,
++            routes,
+             ..Default::default()
+         };
+         let index = GtfsMatchIndex::build(&gtfs);
+@@ -1325,6 +1325,6 @@
+                 value: Some("SIRI::some-uuid-trip-id".to_string()),
+             }),
+             line_ref: Some(ValueWrapper {
+-                value: Some("STIF:Line::route-id:".to_string()),
++                value: Some("C".to_string()),
+             }),
+             operator_ref: None,
+@@ -1337,5 +1337,5 @@
+                 estimated_call: vec![EstimatedCall {
+                     stop_point_ref: Some(ValueWrapper {
+-                        value: Some("STIF:StopPoint:Q:47874:".to_string()),
++                        value: Some("8600999".to_string()),
+                     }),
+                     aimed_arrival_time: None,
+diff --git a/src/processor.rs b/src/processor.rs
+--- a/src/processor.rs
++++ b/src/processor.rs
+@@ -55,4 +55,4 @@
+             for mut journey in frame.estimated_vehicle_journey {
+-                // IDFM does not consistently return EstimatedCall entries in journey order.
++                // The feed may return EstimatedCall entries out of journey order.
+                 // Sort them by their absolute SIRI timestamps before stop-sequence matching.
+                 sort_estimated_calls_by_time(&mut journey);
+@@ -172,5 +172,5 @@
+                         }
+ 
+                         // Prefer a realtime prediction, but use the aimed schedule time
+-                        // when IDFM does not provide an expected timestamp.
++                        // when the feed does not provide an expected timestamp.
+                         if let Some(time_str) = call
+@@ -344,4 +344,4 @@
+ fn estimated_call_sort_key(call: &EstimatedCall) -> (bool, i64) {
+     // Aimed times describe the static journey order and are therefore preferred.
+-    // Expected times are only a fallback for calls where IDFM omitted aimed times.
++    // Expected times are only a fallback for calls without aimed times.
+     let aimed_timestamp = [
+@@ -447,6 +447,6 @@
+         use crate::state::AppState;
+         use crate::state::LoadedGtfs;
+         use dashmap::DashMap;
+-        use gtfs_structures::{Gtfs, Stop, StopTime, Trip};
++        use gtfs_structures::{Gtfs, Route, Stop, StopTime, Trip};
+         use std::collections::HashMap;
+         use std::sync::Arc;
+@@ -456,5 +456,5 @@
+         let stop = Arc::new(Stop {
+-            id: "IDFM:monomodalStopPlace:12345".to_string(),
++            id: "8600626".to_string(),
+             ..Default::default()
+         });
+ 
+@@ -464,5 +464,5 @@
+             Trip {
+                 id: "trip-1".to_string(),
+                 service_id: "service-1".to_string(),
+-                route_id: "IDFM:route-1".to_string(),
++                route_id: "route-c".to_string(),
+                 stop_times: vec![StopTime {
+@@ -478,15 +478,24 @@
+         let mut stops = HashMap::new();
+         stops.insert(
+-            "IDFM:monomodalStopPlace:12345".to_string(),
++            "8600626".to_string(),
+             Arc::new(Stop {
+-                id: "IDFM:monomodalStopPlace:12345".to_string(),
++                id: "8600626".to_string(),
+                 ..Default::default()
+             }),
+         );
++        let routes = HashMap::from([(
++            "route-c".to_string(),
++            Route {
++                id: "route-c".to_string(),
++                short_name: Some("C".to_string()),
++                ..Default::default()
++            },
++        )]);
+ 
+         let gtfs = Gtfs {
+             trips,
+             stops,
++            routes,
+             ..Default::default()
+         };
+ 
+@@ -502,6 +502,6 @@
+                 value: Some("SIRI::trip-1".to_string()),
+             }),
+             line_ref: Some(ValueWrapper {
+-                value: Some("STIF:Line::route-1:".to_string()),
++                value: Some("C".to_string()),
+             }),
+             operator_ref: None,
+@@ -514,5 +514,5 @@
+                     EstimatedCall {
+                         stop_point_ref: Some(ValueWrapper {
+-                            value: Some("STIF:StopPoint:Q:12345:".to_string()),
++                            value: Some("8600626".to_string()),
+                         }),
+                         aimed_arrival_time: None,
+@@ -527,5 +527,5 @@
+                     EstimatedCall {
+                         stop_point_ref: Some(ValueWrapper {
+-                            value: Some("STIF:StopPoint:Q:47874:".to_string()),
++                            value: Some("8600999".to_string()),
+                         }),
+                         aimed_arrival_time: None,
+@@ -557,10 +557,10 @@
+         assert_eq!(feed.entity.len(), 1);
+         let update = feed.entity[0].trip_update.as_ref().unwrap();
+-        // Emits exactly one update for the mapped static stop ID 12345, skipping the unmapped one.
++        // Emits exactly one update for the mapped static stop, skipping the unmapped one.
+         assert_eq!(update.stop_time_update.len(), 1);
+         assert_eq!(
+             update.stop_time_update[0].stop_id,
+-            Some("IDFM:monomodalStopPlace:12345".to_string())
++            Some("8600626".to_string())
+         );
+     }
+ }
+diff --git a/src/bin/test.rs b/src/bin/test.rs
+--- a/src/bin/test.rs
++++ b/src/bin/test.rs
+@@ -3,69 +3,65 @@
+ use std::fs::File;
+ use std::io::BufReader;
+ 
++const GTFS_URL: &str = "https://www.rejseplanen.info/labs/GTFS.zip";
++
++fn value_string(value: &Value) -> Option<&str> {
++    value
++        .as_str()
++        .or_else(|| value.get("value").and_then(Value::as_str))
++}
++
+ fn main() {
+-    println!("Loading GTFS...");
+-    let gtfs = Gtfs::from_url("https://eu.ftp.opendatasoft.com/stif/GTFS/IDFM-gtfs.zip")
+-        .expect("Failed to load GTFS");
+-    println!("GTFS loaded. Total trips: {}", gtfs.trips.len());
+-
+-    let mut with_short_name = 0;
+-    for (_id, trip) in &gtfs.trips {
+-        if trip.trip_short_name.is_some() {
+-            with_short_name += 1;
+-            if with_short_name <= 10 {
+-                println!(
+-                    "Trip ID: {}, Route: {}, Short Name: {:?}",
+-                    trip.id, trip.route_id, trip.trip_short_name
+-                );
+-            }
+-        }
+-    }
+-    println!("Trips with short name: {}", with_short_name);
++    println!("Loading Danmark GTFS...");
++    let gtfs = Gtfs::from_url(GTFS_URL).expect("Failed to load GTFS");
++    println!(
++        "GTFS loaded: {} trips, {} routes, {} stops",
++        gtfs.trips.len(),
++        gtfs.routes.len(),
++        gtfs.stops.len()
++    );
+ 
+     println!("Loading example.json...");
+-    let file = File::open("example.json").unwrap();
++    let file = File::open("example.json").expect("Failed to open example.json");
+     let reader = BufReader::new(file);
+-    let v: Value = serde_json::from_reader(reader).unwrap();
++    let value: Value = serde_json::from_reader(reader).expect("Failed to parse example.json");
+ 
+-    let deliveries = v["Siri"]["ServiceDelivery"]["EstimatedTimetableDelivery"]
++    let deliveries = value["Siri"]["ServiceDelivery"]["EstimatedTimetableDelivery"]
+         .as_array()
+-        .unwrap();
+-
+-    let mut found_matches = 0;
+-    let mut total_with_name = 0;
++        .expect("Missing EstimatedTimetableDelivery array");
+ 
+-    for del in deliveries {
+-        let frames = del["EstimatedJourneyVersionFrame"].as_array().unwrap();
++    let mut journeys_with_line_ref = 0_usize;
++    let mut matched_journeys = 0_usize;
++    let mut candidate_routes = 0_usize;
++
++    for delivery in deliveries {
++        let frames = delivery["EstimatedJourneyVersionFrame"]
++            .as_array()
++            .expect("Missing EstimatedJourneyVersionFrame array");
+         for frame in frames {
+-            let journeys = frame["EstimatedVehicleJourney"].as_array().unwrap();
++            let journeys = frame["EstimatedVehicleJourney"]
++                .as_array()
++                .expect("Missing EstimatedVehicleJourney array");
+             for journey in journeys {
+-                if let Some(names) = journey["VehicleJourneyName"].as_array() {
+-                    if !names.is_empty() {
+-                        total_with_name += 1;
+-                        let val = names[0]["value"].as_str().unwrap();
+-
+-                        // Try to find a matching trip by trip_short_name
+-                        let mut matched = false;
+-                        for (_id, trip) in &gtfs.trips {
+-                            if let Some(short_name) = &trip.trip_short_name {
+-                                if short_name == val {
+-                                    matched = true;
+-                                    break;
+-                                }
+-                            }
+-                        }
+-                        if matched {
+-                            found_matches += 1;
+-                        }
+-                    }
++                let Some(line_ref) = value_string(&journey["LineRef"]).map(str::trim) else {
++                    continue;
++                };
++                journeys_with_line_ref += 1;
++
++                let matches = gtfs
++                    .routes
++                    .values()
++                    .filter(|route| route.short_name.as_deref().map(str::trim) == Some(line_ref))
++                    .count();
++                candidate_routes += matches;
++                if matches > 0 {
++                    matched_journeys += 1;
+                 }
+             }
+         }
+     }
+ 
+     println!(
+-        "Total journeys with VehicleJourneyName: {}, Matched trips: {}",
+-        total_with_name, found_matches
++        "Journeys with LineRef: {journeys_with_line_ref}, matched journeys: {matched_journeys}, candidate routes: {candidate_routes}"
+     );
+ }
+

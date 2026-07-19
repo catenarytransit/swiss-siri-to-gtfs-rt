@@ -12,7 +12,7 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 pub async fn start_gtfs_updater(state: Arc<AppState>, url: String) -> Result<()> {
     let cache_path = std::env::var("GTFS_CACHE_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("./idfm-gtfs.zip"));
+        .unwrap_or_else(|_| PathBuf::from("./danmark-gtfs.zip"));
 
     if let Some(parent) = cache_path.parent() {
         tokio::fs::create_dir_all(parent).await.with_context(|| {
