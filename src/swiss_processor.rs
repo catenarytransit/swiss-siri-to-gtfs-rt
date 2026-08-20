@@ -55,9 +55,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
 
                 let best = candidate_trip_ids
                     .iter()
-                    .filter_map(|trip_id| {
-                        build_candidate(&journey, trip_id, &loaded_gtfs.gtfs)
-                    })
+                    .filter_map(|trip_id| build_candidate(&journey, trip_id, &loaded_gtfs.gtfs))
                     .max_by_key(|candidate| candidate.matched_calls);
 
                 let Some(candidate) = best else {

@@ -3,17 +3,16 @@ use crate::state::AppState;
 use crate::swiss_processor::process_siri;
 use flate2::read::GzDecoder;
 use reqwest::Client;
-use reqwest::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, HeaderValue};
+use reqwest::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, HeaderValue, USER_AGENT};
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub async fn start_downloader(
-    state: Arc<AppState>,
-    url: String,
-    authorization: Option<String>,
-) {
-    let client = Client::new();
+pub async fn start_downloader(state: Arc<AppState>, url: String, authorization: Option<String>) {
+    let client = Client::builder()
+        .user_agent("catenary-swiss-siri-to-gtfs-rt/1.0")
+        .build()
+        .expect("failed to build HTTP client");
 
     let authorization = authorization.and_then(|value| match HeaderValue::from_str(&value) {
         Ok(value) => Some(value),

@@ -143,11 +143,15 @@ impl<'de> Deserialize<'de> for EstimatedVehicleJourney {
             estimated_call: Vec::new(),
         });
         if let Some(recorded_calls) = wire.recorded_calls {
-            estimated_calls
-                .estimated_call
-                .extend(recorded_calls.recorded_call.into_iter().map(EstimatedCall::from));
+            estimated_calls.estimated_call.extend(
+                recorded_calls
+                    .recorded_call
+                    .into_iter()
+                    .map(EstimatedCall::from),
+            );
         }
-        let estimated_calls = (!estimated_calls.estimated_call.is_empty()).then_some(estimated_calls);
+        let estimated_calls =
+            (!estimated_calls.estimated_call.is_empty()).then_some(estimated_calls);
 
         Ok(Self {
             dated_vehicle_journey_ref,
@@ -311,6 +315,9 @@ mod tests {
                 .and_then(|value| value.value.as_deref()),
             Some("ch:1:sloid:1500")
         );
-        assert_eq!(call.expected_departure_time.as_deref(), Some("2026-08-20T15:36:22Z"));
+        assert_eq!(
+            call.expected_departure_time.as_deref(),
+            Some("2026-08-20T15:36:22Z")
+        );
     }
 }
