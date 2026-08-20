@@ -316,13 +316,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "danmark-gtfsrt"
+name = "swiss-siri-to-gtfs-rt"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
  "chrono-tz",
+ "csv",
  "dashmap",
+ "flate2",
  "futures-util",
  "gtfs-realtime",
  "gtfs-structures",
@@ -334,6 +336,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "warp",
+ "zip",
 ]
 
 [[package]]

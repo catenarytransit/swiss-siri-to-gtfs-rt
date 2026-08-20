@@ -44,10 +44,11 @@ pub struct EstimatedVehicleJourney {
     pub estimated_calls: Option<EstimatedCalls>,
 }
 
-// Denmark's XML feed places DatedVehicleJourneyRef inside
-// FramedVehicleJourneyRef, while the existing matchers expect the flattened
-// dated_vehicle_journey_ref field above. Deserialize through this wire model
-// and normalize the nested value without changing the processor API.
+// Swiss SIRI places DatedVehicleJourneyRef inside FramedVehicleJourneyRef.
+// The wire model also folds RecordedCalls into EstimatedCalls so the rest of
+// the pipeline can treat observed and predicted calls uniformly. Actual times
+// become expected times, which preserves the existing realtime-over-aimed
+// precedence without changing the public model used throughout the repo.
 #[derive(Debug, Clone, Deserialize)]
 struct EstimatedVehicleJourneyWire {
     #[serde(rename = "DatedVehicleJourneyRef")]
@@ -70,12 +71,58 @@ struct EstimatedVehicleJourneyWire {
     journey_note: Option<Vec<ValueWrapper>>,
     #[serde(rename = "EstimatedCalls")]
     estimated_calls: Option<EstimatedCalls>,
+    #[serde(rename = "RecordedCalls")]
+    recorded_calls: Option<RecordedCallsWire>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct FramedVehicleJourneyRef {
     #[serde(rename = "DatedVehicleJourneyRef")]
     dated_vehicle_journey_ref: Option<ValueWrapper>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RecordedCallsWire {
+    #[serde(rename = "RecordedCall", default)]
+    recorded_call: Vec<RecordedCallWire>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RecordedCallWire {
+    #[serde(rename = "StopPointRef")]
+    stop_point_ref: Option<ValueWrapper>,
+    #[serde(rename = "AimedArrivalTime")]
+    aimed_arrival_time: Option<String>,
+    #[serde(rename = "AimedDepartureTime")]
+    aimed_departure_time: Option<String>,
+    #[serde(rename = "ActualArrivalTime")]
+    actual_arrival_time: Option<String>,
+    #[serde(rename = "ActualDepartureTime")]
+    actual_departure_time: Option<String>,
+    #[serde(rename = "ArrivalStatus")]
+    arrival_status: Option<String>,
+    #[serde(rename = "DepartureStatus")]
+    departure_status: Option<String>,
+    #[serde(rename = "ArrivalPlatformName")]
+    arrival_platform_name: Option<ValueWrapper>,
+    #[serde(rename = "DeparturePlatformName")]
+    departure_platform_name: Option<ValueWrapper>,
+}
+
+impl From<RecordedCallWire> for EstimatedCall {
+    fn from(call: RecordedCallWire) -> Self {
+        Self {
+            stop_point_ref: call.stop_point_ref,
+            aimed_arrival_time: call.aimed_arrival_time,
+            aimed_departure_time: call.aimed_departure_time,
+            expected_arrival_time: call.actual_arrival_time,
+            expected_departure_time: call.actual_departure_time,
+            arrival_status: call.arrival_status,
+            departure_status: call.departure_status,
+            arrival_platform_name: call.arrival_platform_name,
+            departure_platform_name: call.departure_platform_name,
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for EstimatedVehicleJourney {
@@ -90,9 +137,17 @@ impl<'de> Deserialize<'de> for EstimatedVehicleJourney {
                 wire.framed_vehicle_journey_ref
                     .and_then(|reference| reference.dated_vehicle_journey_ref)
             })
-            // Some SIRI producers only expose VehicleJourneyRef. It is a useful
-            // final exact-match key when the framed reference is unavailable.
             .or(wire.vehicle_journey_ref);
+
+        let mut estimated_calls = wire.estimated_calls.unwrap_or(EstimatedCalls {
+            estimated_call: Vec::new(),
+        });
+        if let Some(recorded_calls) = wire.recorded_calls {
+            estimated_calls
+                .estimated_call
+                .extend(recorded_calls.recorded_call.into_iter().map(EstimatedCall::from));
+        }
+        let estimated_calls = (!estimated_calls.estimated_call.is_empty()).then_some(estimated_calls);
 
         Ok(Self {
             dated_vehicle_journey_ref,
@@ -102,7 +157,7 @@ impl<'de> Deserialize<'de> for EstimatedVehicleJourney {
             direction_name: wire.direction_name,
             destination_ref: wire.destination_ref,
             journey_note: wire.journey_note,
-            estimated_calls: wire.estimated_calls,
+            estimated_calls,
         })
     }
 }
@@ -209,5 +264,53 @@ mod tests {
                 .and_then(|value| value.value.as_deref()),
             Some("000805000102")
         );
+    }
+
+    #[test]
+    fn parses_swiss_recorded_calls_as_realtime_calls() {
+        let xml = r#"<Siri xmlns="http://www.siri.org.uk/siri" version="2.0">
+  <ServiceDelivery>
+    <EstimatedTimetableDelivery>
+      <EstimatedJourneyVersionFrame>
+        <EstimatedVehicleJourney>
+          <FramedVehicleJourneyRef>
+            <DataFrameRef>2026-08-20</DataFrameRef>
+            <DatedVehicleJourneyRef>ch:1:sjyid:100001:18476-001</DatedVehicleJourneyRef>
+          </FramedVehicleJourneyRef>
+          <RecordedCalls>
+            <RecordedCall>
+              <StopPointRef>ch:1:sloid:1500</StopPointRef>
+              <VisitNumber>1</VisitNumber>
+              <AimedDepartureTime>2026-08-20T15:35:00Z</AimedDepartureTime>
+              <ActualDepartureTime>2026-08-20T15:36:22Z</ActualDepartureTime>
+              <DeparturePlatformName>3</DeparturePlatformName>
+            </RecordedCall>
+          </RecordedCalls>
+        </EstimatedVehicleJourney>
+      </EstimatedJourneyVersionFrame>
+    </EstimatedTimetableDelivery>
+  </ServiceDelivery>
+</Siri>"#;
+
+        let siri: Siri = quick_xml::de::from_str(xml).expect("valid Swiss SIRI XML");
+        let journey = &siri.service_delivery.estimated_timetable_delivery[0]
+            .estimated_journey_version_frame[0]
+            .estimated_vehicle_journey[0];
+        let call = &journey.estimated_calls.as_ref().unwrap().estimated_call[0];
+
+        assert_eq!(
+            journey
+                .dated_vehicle_journey_ref
+                .as_ref()
+                .and_then(|value| value.value.as_deref()),
+            Some("ch:1:sjyid:100001:18476-001")
+        );
+        assert_eq!(
+            call.stop_point_ref
+                .as_ref()
+                .and_then(|value| value.value.as_deref()),
+            Some("ch:1:sloid:1500")
+        );
+        assert_eq!(call.expected_departure_time.as_deref(), Some("2026-08-20T15:36:22Z"));
     }
 }

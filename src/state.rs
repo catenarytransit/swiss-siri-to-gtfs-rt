@@ -5,6 +5,7 @@ use dashmap::DashMap;
 use gtfs_realtime::FeedMessage;
 use gtfs_structures::Gtfs;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -26,16 +27,25 @@ pub struct LoadedGtfs {
     pub gtfs: Gtfs,
     pub match_index: GtfsMatchIndex,
     pub stop_alias_index: StopAliasIndex,
+    pub original_trip_id_to_trip_ids: HashMap<String, Vec<String>>,
 }
 
 impl LoadedGtfs {
     pub fn new(gtfs: Gtfs) -> Self {
+        Self::with_original_trip_ids(gtfs, HashMap::new())
+    }
+
+    pub fn with_original_trip_ids(
+        gtfs: Gtfs,
+        original_trip_id_to_trip_ids: HashMap<String, Vec<String>>,
+    ) -> Self {
         let match_index = GtfsMatchIndex::build(&gtfs);
         let stop_alias_index = StopAliasIndex::build(&gtfs);
         Self {
             gtfs,
             match_index,
             stop_alias_index,
+            original_trip_id_to_trip_ids,
         }
     }
 }

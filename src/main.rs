@@ -7,6 +7,7 @@ mod matching_diagnostics;
 mod processor;
 mod siri_models;
 mod state;
+mod swiss_processor;
 
 use anyhow::Result;
 use gtfs_realtime::FeedMessage;
@@ -22,12 +23,13 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-const GTFS_URL: &str = "https://www.rejseplanen.info/labs/GTFS.zip";
-const SIRI_URL: &str = "https://jbb.ghsq.de/siri/danmark";
+const GTFS_URL: &str =
+    "https://data.opentransportdata.swiss/en/dataset/timetable-2026-gtfs2020/permalink";
+const SIRI_URL: &str = "https://api.opentransportdata.swiss/la/siri-et";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("Initializing Danmark GTFS-RT Server...");
+    println!("Initializing Swiss SIRI to GTFS-RT server...");
 
     let state = {
         let rt_cache_path = std::env::var("GTFS_RT_CACHE_PATH")
@@ -65,11 +67,21 @@ async fn main() -> Result<()> {
         Arc::new(AppState::new(initial_feed))
     };
 
-    // Start background GTFS update loop
-    gtfs_manager::start_gtfs_updater(state.clone(), GTFS_URL.to_string()).await?;
+    let gtfs_url = std::env::var("GTFS_URL").unwrap_or_else(|_| GTFS_URL.to_string());
+    let siri_url = std::env::var("SIRI_URL").unwrap_or_else(|_| SIRI_URL.to_string());
+    let siri_authorization = std::env::var("SIRI_AUTHORIZATION").ok();
 
-    // Start background SIRI downloader loop
-    downloader::start_downloader(state.clone(), SIRI_URL.to_string()).await;
+    if siri_authorization.is_none() {
+        eprintln!(
+            "SIRI_AUTHORIZATION is not set; the Swiss SIRI endpoint will normally return 401"
+        );
+    }
+
+    // Start background GTFS update loop.
+    gtfs_manager::start_gtfs_updater(state.clone(), gtfs_url).await?;
+
+    // Start background SIRI downloader loop.
+    downloader::start_downloader(state.clone(), siri_url, siri_authorization).await;
 
     // HTTP Server Setup
     let state_filter = warp::any().map(move || state.clone());

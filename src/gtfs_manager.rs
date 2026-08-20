@@ -2,6 +2,9 @@ use crate::state::{AppState, LoadedGtfs};
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use gtfs_structures::Gtfs;
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::fs::File as StdFile;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,10 +12,23 @@ use tokio::io::AsyncWriteExt;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
+type OriginalTripIdIndex = HashMap<String, Vec<String>>;
+
+struct GtfsBundle {
+    gtfs: Gtfs,
+    original_trip_id_to_trip_ids: OriginalTripIdIndex,
+}
+
+#[derive(Deserialize)]
+struct SwissTripRow {
+    trip_id: String,
+    original_trip_id: String,
+}
+
 pub async fn start_gtfs_updater(state: Arc<AppState>, url: String) -> Result<()> {
     let cache_path = std::env::var("GTFS_CACHE_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("./danmark-gtfs.zip"));
+        .unwrap_or_else(|_| PathBuf::from("./swiss-gtfs.zip"));
 
     if let Some(parent) = cache_path.parent() {
         tokio::fs::create_dir_all(parent).await.with_context(|| {
@@ -21,16 +37,17 @@ pub async fn start_gtfs_updater(state: Arc<AppState>, url: String) -> Result<()>
     }
 
     let loaded_existing_cache = match load_gtfs_from_disk(&cache_path).await {
-        Ok(gtfs) => {
+        Ok(bundle) => {
             println!(
-                "Loaded cached GTFS from {}: {} trips, {} stops, {} routes",
+                "Loaded cached GTFS from {}: {} trips, {} stops, {} routes, {} original trip ids",
                 cache_path.display(),
-                gtfs.trips.len(),
-                gtfs.stops.len(),
-                gtfs.routes.len(),
+                bundle.gtfs.trips.len(),
+                bundle.gtfs.stops.len(),
+                bundle.gtfs.routes.len(),
+                bundle.original_trip_id_to_trip_ids.len(),
             );
 
-            publish_gtfs(&state, gtfs).await?;
+            publish_gtfs(&state, bundle).await?;
             true
         }
 
@@ -41,18 +58,19 @@ pub async fn start_gtfs_updater(state: Arc<AppState>, url: String) -> Result<()>
             );
             println!("Downloading initial GTFS dataset...");
 
-            let gtfs = download_validate_and_replace(&url, &cache_path)
+            let bundle = download_validate_and_replace(&url, &cache_path)
                 .await
                 .context("Failed to obtain initial GTFS dataset")?;
 
             println!(
-                "Downloaded initial GTFS: {} trips, {} stops, {} routes",
-                gtfs.trips.len(),
-                gtfs.stops.len(),
-                gtfs.routes.len(),
+                "Downloaded initial GTFS: {} trips, {} stops, {} routes, {} original trip ids",
+                bundle.gtfs.trips.len(),
+                bundle.gtfs.stops.len(),
+                bundle.gtfs.routes.len(),
+                bundle.original_trip_id_to_trip_ids.len(),
             );
 
-            publish_gtfs(&state, gtfs).await?;
+            publish_gtfs(&state, bundle).await?;
             false
         }
     };
@@ -70,15 +88,16 @@ pub async fn start_gtfs_updater(state: Arc<AppState>, url: String) -> Result<()>
             println!("Checking for an updated GTFS dataset...");
 
             match download_validate_and_replace(&url, &cache_path).await {
-                Ok(gtfs) => {
+                Ok(bundle) => {
                     println!(
-                        "GTFS refreshed: {} trips, {} stops, {} routes",
-                        gtfs.trips.len(),
-                        gtfs.stops.len(),
-                        gtfs.routes.len(),
+                        "GTFS refreshed: {} trips, {} stops, {} routes, {} original trip ids",
+                        bundle.gtfs.trips.len(),
+                        bundle.gtfs.stops.len(),
+                        bundle.gtfs.routes.len(),
+                        bundle.original_trip_id_to_trip_ids.len(),
                     );
 
-                    if let Err(error) = publish_gtfs(&state, gtfs).await {
+                    if let Err(error) = publish_gtfs(&state, bundle).await {
                         eprintln!(
                             "Failed to build GTFS matching index; retaining existing dataset: {error:#}"
                         );
@@ -99,7 +118,7 @@ pub async fn start_gtfs_updater(state: Arc<AppState>, url: String) -> Result<()>
     Ok(())
 }
 
-async fn load_gtfs_from_disk(path: &Path) -> Result<Gtfs> {
+async fn load_gtfs_from_disk(path: &Path) -> Result<GtfsBundle> {
     let metadata = tokio::fs::metadata(path)
         .await
         .with_context(|| format!("GTFS cache does not exist: {}", path.display()))?;
@@ -111,13 +130,13 @@ async fn load_gtfs_from_disk(path: &Path) -> Result<Gtfs> {
     let path_buf = path.to_path_buf();
     let parse_path = path_buf.clone();
 
-    tokio::task::spawn_blocking(move || Gtfs::from_path(&parse_path))
+    tokio::task::spawn_blocking(move || parse_gtfs_bundle(&parse_path))
         .await
         .context("GTFS parsing task panicked")?
         .with_context(|| format!("Failed to parse cached GTFS {}", path_buf.display()))
 }
 
-async fn download_validate_and_replace(url: &str, cache_path: &Path) -> Result<Gtfs> {
+async fn download_validate_and_replace(url: &str, cache_path: &Path) -> Result<GtfsBundle> {
     // Keep the temporary file next to the final file so rename remains
     // atomic on Linux.
     let temporary_path = cache_path.with_extension("zip.tmp");
@@ -189,16 +208,15 @@ async fn download_validate_and_replace(url: &str, cache_path: &Path) -> Result<G
         temporary_path.display()
     );
 
-    // Validate and fully parse the new ZIP before replacing the known-good
-    // cache. A broken download can therefore never destroy the old cache.
+    // Validate and fully parse the new ZIP, including the Swiss
+    // original_trip_id extension, before replacing the known-good cache.
     let parse_path = temporary_path.clone();
-
-    let gtfs = tokio::task::spawn_blocking(move || Gtfs::from_path(&parse_path))
+    let bundle = tokio::task::spawn_blocking(move || parse_gtfs_bundle(&parse_path))
         .await
         .context("GTFS parsing task panicked")?
         .with_context(|| {
             format!(
-                "Downloaded file is not a valid GTFS dataset: {}",
+                "Downloaded file is not a valid Swiss GTFS dataset: {}",
                 temporary_path.display()
             )
         })?;
@@ -217,17 +235,80 @@ async fn download_validate_and_replace(url: &str, cache_path: &Path) -> Result<G
 
     println!("Saved GTFS cache to {}", cache_path.display());
 
-    Ok(gtfs)
+    Ok(bundle)
 }
 
-async fn publish_gtfs(state: &Arc<AppState>, gtfs: Gtfs) -> Result<()> {
-    let loaded_gtfs = tokio::task::spawn_blocking(move || LoadedGtfs::new(gtfs))
-        .await
-        .context("GTFS matching-index task panicked")?;
+fn parse_gtfs_bundle(path: &Path) -> Result<GtfsBundle> {
+    let gtfs = Gtfs::from_path(path).context("Failed to parse GTFS")?;
+    let original_trip_id_to_trip_ids = load_original_trip_id_index(path)?;
+
+    Ok(GtfsBundle {
+        gtfs,
+        original_trip_id_to_trip_ids,
+    })
+}
+
+fn load_original_trip_id_index(path: &Path) -> Result<OriginalTripIdIndex> {
+    let file = StdFile::open(path)
+        .with_context(|| format!("Failed to open GTFS zip {}", path.display()))?;
+    let mut archive = zip::ZipArchive::new(file).context("Failed to open GTFS zip archive")?;
+
+    let mut trips_index = None;
+    for index in 0..archive.len() {
+        let is_trips_txt = {
+            let entry = archive
+                .by_index(index)
+                .with_context(|| format!("Failed to inspect GTFS zip entry {index}"))?;
+            let name = entry.name();
+            name == "trips.txt" || name.ends_with("/trips.txt")
+        };
+        if is_trips_txt {
+            trips_index = Some(index);
+            break;
+        }
+    }
+
+    let trips_index = trips_index.context("GTFS zip does not contain trips.txt")?;
+    let trips_file = archive
+        .by_index(trips_index)
+        .context("Failed to open trips.txt from GTFS zip")?;
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(true)
+        .from_reader(trips_file);
+
+    let mut index = OriginalTripIdIndex::new();
+    for row in reader.deserialize::<SwissTripRow>() {
+        let row = row.context("Failed to parse Swiss trips.txt")?;
+        let trip_id = row.trip_id.trim();
+        let original_trip_id = row.original_trip_id.trim();
+        if trip_id.is_empty() || original_trip_id.is_empty() {
+            continue;
+        }
+
+        index
+            .entry(original_trip_id.to_string())
+            .or_default()
+            .push(trip_id.to_string());
+    }
+
+    if index.is_empty() {
+        anyhow::bail!("trips.txt did not contain any usable original_trip_id values");
+    }
+
+    Ok(index)
+}
+
+async fn publish_gtfs(state: &Arc<AppState>, bundle: GtfsBundle) -> Result<()> {
+    let loaded_gtfs = tokio::task::spawn_blocking(move || {
+        LoadedGtfs::with_original_trip_ids(bundle.gtfs, bundle.original_trip_id_to_trip_ids)
+    })
+    .await
+    .context("GTFS matching-index task panicked")?;
 
     println!(
-        "Built GTFS matching index with {} unique directions",
-        loaded_gtfs.match_index.direction_count()
+        "Built GTFS matching index with {} unique directions and {} original trip ids",
+        loaded_gtfs.match_index.direction_count(),
+        loaded_gtfs.original_trip_id_to_trip_ids.len(),
     );
 
     let mut lock = state.gtfs.write().await;
