@@ -53,7 +53,9 @@ impl LoadedGtfs {
     }
 
     pub fn stop_id(&self, index: StopIndex) -> Option<&str> {
-        self.stop_ids.get(index as usize).map(|value| value.as_ref())
+        self.stop_ids
+            .get(index as usize)
+            .map(|value| value.as_ref())
     }
 
     pub fn trip_stop_indices(&self, trip: &CompactTrip) -> &[StopIndex] {

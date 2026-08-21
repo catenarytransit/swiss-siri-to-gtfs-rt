@@ -138,7 +138,9 @@ fn build_candidate(
         next_stop_index = stop_index + 1;
         matched_calls += 1;
 
-        let stop_id = gtfs.stop_id(gtfs.trip_stop_indices(trip)[stop_index])?.to_string();
+        let stop_id = gtfs
+            .stop_id(gtfs.trip_stop_indices(trip)[stop_index])?
+            .to_string();
         let mut stop_update = StopTimeUpdate::default();
         stop_update.stop_id = Some(stop_id.clone());
 
