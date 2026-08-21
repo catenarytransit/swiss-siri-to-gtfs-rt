@@ -1,10 +1,5 @@
-mod adaptive_matching;
 mod downloader;
-mod enhanced_processor;
 mod gtfs_manager;
-mod matching;
-mod matching_diagnostics;
-mod processor;
 mod siri_models;
 mod state;
 mod swiss_processor;
@@ -105,11 +100,11 @@ async fn main() -> Result<()> {
         .and(warp::get())
         .and(state_filter.clone())
         .then(|state: Arc<AppState>| async move {
-            let mut data = std::collections::HashMap::new();
-            for item in state.trip_platforms.iter() {
-                data.insert(item.key().clone(), item.value().clone());
-            }
-            warp::reply::json(&data)
+            let data = {
+                let lock = state.trip_platforms.read().await;
+                Arc::clone(&*lock)
+            };
+            warp::reply::json(&*data)
         });
 
     let routes = gtfs_rt_route.or(platforms_route);

@@ -1,5 +1,5 @@
 use crate::siri_models::{EstimatedCall, EstimatedVehicleJourney, SiriResponse};
-use crate::state::{AppState, PlatformInfo};
+use crate::state::{AppState, CompactTrip, LoadedGtfs, PlatformInfo, TripIndex};
 use chrono::{DateTime, Utc};
 use gtfs_realtime::{
     FeedEntity, FeedHeader, FeedMessage, TripDescriptor, TripUpdate,
@@ -8,8 +8,7 @@ use gtfs_realtime::{
         stop_time_update::ScheduleRelationship as StopTimeScheduleRelationship,
     },
 };
-use gtfs_structures::{Gtfs, Trip};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
@@ -31,7 +30,8 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
     let mut matched = 0_u64;
     let mut missing_original_trip_id = 0_u64;
     let mut stop_alignment_misses = 0_u64;
-    let mut emitted_trip_ids = HashSet::new();
+    let mut emitted_trip_indices = HashSet::<TripIndex>::new();
+    let mut current_platforms = HashMap::<String, Vec<PlatformInfo>>::new();
 
     for delivery in siri.siri.service_delivery.estimated_timetable_delivery {
         for frame in delivery.estimated_journey_version_frame {
@@ -45,17 +45,17 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                     continue;
                 };
 
-                let Some(candidate_trip_ids) = loaded_gtfs
-                    .original_trip_id_to_trip_ids
-                    .get(original_trip_id)
+                let Some(candidate_trip_indices) =
+                    loaded_gtfs.trip_indices_for_original_id(original_trip_id)
                 else {
                     missing_original_trip_id += 1;
                     continue;
                 };
 
-                let best = candidate_trip_ids
+                let best = candidate_trip_indices
                     .iter()
-                    .filter_map(|trip_id| build_candidate(&journey, trip_id, &loaded_gtfs.gtfs))
+                    .copied()
+                    .filter_map(|trip_index| build_candidate(&journey, trip_index, &loaded_gtfs))
                     .max_by_key(|candidate| candidate.matched_calls);
 
                 let Some(candidate) = best else {
@@ -63,20 +63,28 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
                     continue;
                 };
 
-                if !emitted_trip_ids.insert(candidate.trip_id.clone()) {
+                if !emitted_trip_indices.insert(candidate.trip_index) {
                     continue;
                 }
 
                 if !candidate.platforms.is_empty() {
-                    state
-                        .trip_platforms
-                        .insert(candidate.trip_id.clone(), candidate.platforms);
+                    let trip = loaded_gtfs
+                        .trip(candidate.trip_index)
+                        .expect("candidate trip index must remain valid");
+                    current_platforms.insert(trip.trip_id.to_string(), candidate.platforms);
                 }
 
                 feed.entity.push(candidate.entity);
                 matched += 1;
             }
         }
+    }
+
+    // Replace, rather than append to, the platform cache. This prevents stale
+    // trip/platform strings from accumulating for the lifetime of the process.
+    {
+        let mut lock = state.trip_platforms.write().await;
+        *lock = Arc::new(current_platforms);
     }
 
     println!(
@@ -87,7 +95,7 @@ pub async fn process_siri(state: Arc<AppState>, siri: SiriResponse) {
 }
 
 struct Candidate {
-    trip_id: String,
+    trip_index: TripIndex,
     matched_calls: usize,
     entity: FeedEntity,
     platforms: Vec<PlatformInfo>,
@@ -95,10 +103,11 @@ struct Candidate {
 
 fn build_candidate(
     journey: &EstimatedVehicleJourney,
-    trip_id: &str,
-    gtfs: &Gtfs,
+    trip_index: TripIndex,
+    gtfs: &LoadedGtfs,
 ) -> Option<Candidate> {
-    let trip = gtfs.trips.get(trip_id)?;
+    let trip = gtfs.trip(trip_index)?;
+    let trip_id = trip.trip_id.as_ref();
     let calls = journey.estimated_calls.as_ref()?;
 
     let mut calls = calls.estimated_call.iter().collect::<Vec<_>>();
@@ -122,13 +131,14 @@ fn build_candidate(
             continue;
         };
 
-        let Some(stop_index) = find_next_stop_index(trip, next_stop_index, siri_stop_id) else {
+        let Some(stop_index) = find_next_stop_index(gtfs, trip, next_stop_index, siri_stop_id)
+        else {
             continue;
         };
         next_stop_index = stop_index + 1;
         matched_calls += 1;
 
-        let stop_id = trip.stop_times[stop_index].stop.id.clone();
+        let stop_id = gtfs.stop_id(gtfs.trip_stop_indices(trip)[stop_index])?.to_string();
         let mut stop_update = StopTimeUpdate::default();
         stop_update.stop_id = Some(stop_id.clone());
 
@@ -178,7 +188,7 @@ fn build_candidate(
     }
 
     Some(Candidate {
-        trip_id: trip_id.to_string(),
+        trip_index,
         matched_calls,
         entity: FeedEntity {
             id: trip_id.to_string(),
@@ -189,23 +199,37 @@ fn build_candidate(
     })
 }
 
-fn find_next_stop_index(trip: &Trip, start_index: usize, siri_stop_id: &str) -> Option<usize> {
+fn find_next_stop_index(
+    gtfs: &LoadedGtfs,
+    trip: &CompactTrip,
+    start_index: usize,
+    siri_stop_id: &str,
+) -> Option<usize> {
     let siri_stop_id = normalise_swiss_stop_id(siri_stop_id);
 
-    trip.stop_times
+    gtfs.trip_stop_indices(trip)
         .iter()
         .enumerate()
         .skip(start_index)
-        .find(|(_, stop_time)| normalise_swiss_stop_id(&stop_time.stop.id) == siri_stop_id)
+        .find(|(_, stop_index)| {
+            gtfs.stop_id(**stop_index)
+                .map(normalise_swiss_stop_id)
+                .is_some_and(|gtfs_stop_id| gtfs_stop_id == siri_stop_id)
+        })
         .map(|(index, _)| index)
 }
 
-fn normalise_swiss_stop_id(stop_id: &str) -> String {
-    let parts = stop_id.split(':').collect::<Vec<_>>();
-    if parts.len() >= 4 && parts[0] == "ch" && parts[1] == "1" && parts[2] == "sloid" {
-        return parts[..4].join(":");
-    }
-    stop_id.to_string()
+fn normalise_swiss_stop_id(stop_id: &str) -> &str {
+    const PREFIX: &str = "ch:1:sloid:";
+
+    let Some(rest) = stop_id.strip_prefix(PREFIX) else {
+        return stop_id;
+    };
+    let Some(extra_separator) = rest.find(':') else {
+        return stop_id;
+    };
+
+    &stop_id[..PREFIX.len() + extra_separator]
 }
 
 fn call_sort_key(call: &EstimatedCall) -> (bool, i64) {

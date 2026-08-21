@@ -3,8 +3,8 @@ use crate::state::AppState;
 use crate::swiss_processor::process_siri;
 use flate2::read::GzDecoder;
 use reqwest::Client;
-use reqwest::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, HeaderValue, USER_AGENT};
-use std::io::Read;
+use reqwest::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, HeaderValue};
+use std::io::BufReader;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -45,46 +45,13 @@ pub async fn start_downloader(state: Arc<AppState>, url: String, authorization: 
                         .is_some_and(|value| value.eq_ignore_ascii_case("gzip"));
 
                     match response.bytes().await {
-                        Ok(body) => {
-                            let siri_payload_text = if is_gzip {
-                                let mut decoder = GzDecoder::new(body.as_ref());
-                                let mut text = String::new();
-                                match decoder.read_to_string(&mut text) {
-                                    Ok(_) => Ok(text),
-                                    Err(error) => Err(format!(
-                                        "Failed to decompress gzip SIRI response: {error}"
-                                    )),
-                                }
-                            } else {
-                                String::from_utf8(body.to_vec()).map_err(|error| {
-                                    format!("SIRI response was not valid UTF-8: {error}")
-                                })
-                            };
-
-                            match siri_payload_text {
-                                Ok(siri_payload_text) => {
-                                    // XML deserializers consume the contents of the root element.
-                                    // Parse <Siri> directly, then restore the wrapper expected by
-                                    // the processing pipeline.
-                                    let siri_payload_result =
-                                        quick_xml::de::from_str::<Siri>(&siri_payload_text)
-                                            .map(|siri| SiriResponse { siri });
-
-                                    match siri_payload_result {
-                                        Ok(siri_payload) => {
-                                            println!(
-                                                "Successfully fetched and parsed SIRI XML payload."
-                                            );
-                                            process_siri(state.clone(), siri_payload).await;
-                                        }
-                                        Err(e) => {
-                                            eprintln!("Failed to parse SIRI XML: {}", e);
-                                        }
-                                    }
-                                }
-                                Err(error) => eprintln!("{error}"),
+                        Ok(body) => match parse_siri_body(body.as_ref(), is_gzip) {
+                            Ok(siri) => {
+                                println!("Successfully fetched and parsed SIRI XML payload.");
+                                process_siri(state.clone(), SiriResponse { siri }).await;
                             }
-                        }
+                            Err(error) => eprintln!("{error}"),
+                        },
                         Err(e) => {
                             eprintln!("Failed to read SIRI XML response body: {}", e);
                         }
@@ -101,4 +68,17 @@ pub async fn start_downloader(state: Arc<AppState>, url: String, authorization: 
             tokio::time::sleep(Duration::from_secs(100)).await;
         }
     });
+}
+
+fn parse_siri_body(body: &[u8], is_gzip: bool) -> Result<Siri, String> {
+    if is_gzip {
+        let decoder = GzDecoder::new(body);
+        quick_xml::de::from_reader::<_, Siri>(BufReader::new(decoder))
+            .map_err(|error| format!("Failed to parse gzip SIRI XML: {error}"))
+    } else {
+        let text = std::str::from_utf8(body)
+            .map_err(|error| format!("SIRI response was not valid UTF-8: {error}"))?;
+        quick_xml::de::from_str::<Siri>(text)
+            .map_err(|error| format!("Failed to parse SIRI XML: {error}"))
+    }
 }
